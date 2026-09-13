@@ -1,0 +1,61 @@
+{
+  "name": "spor",
+  "version": "0.0.1",
+  "license": "Apache-2.0",
+  "author": "Anders Hessellund Jensen",
+  "description": "Tracks down the shortest, least-surprising failure trace — budget-bounded, iteratively deepened state-space exploration for JavaScript.",
+  "keywords": [
+    "state space",
+    "model checking",
+    "exploration",
+    "bfs",
+    "iterative deepening",
+    "concurrency testing",
+    "deterministic simulation"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andershessellund/spor.git"
+  },
+  "bugs": "https://github.com/andershessellund/spor/issues",
+  "homepage": "https://github.com/andershessellund/spor#readme",
+  "sideEffects": false,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src",
+    "!src/**/*.test.ts"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc -w",
+    "test": "vitest run",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.tests.json",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "prepack": "pnpm build"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@12.3.4",
+  "peerDependencies": {
+    "valsem": ">=0.0.3 <1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.0.0",
+    "valsem": "^0.0.3",
+    "vitest": "^3.0.0"
+  }
+}
