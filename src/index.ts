@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// spor — generic state-space exploration
+// stifinder — generic state-space exploration
 //
 // Two-layer API:
 //
@@ -332,7 +332,7 @@ export class StateSpaceCache<State, Event> {
     const fresh = await this.config.getEvents(state);
     for (const ev of fresh) {
       if (ev.cost.includes(DEVIATIONS_KEY)) {
-        throw new Error(`spor: event cost must not include the reserved key ${DEVIATIONS_KEY}`);
+        throw new Error(`stifinder: event cost must not include the reserved key ${DEVIATIONS_KEY}`);
       }
     }
     this.events.set(state, fresh);
@@ -438,7 +438,7 @@ async function exploreUntil<State, Event>(
   limits: Limits,
 ): Promise<ExploreResult> {
   if (cache.exploring) {
-    throw new Error('spor: explore() called while another explore() on the same cache is in flight');
+    throw new Error('stifinder: explore() called while another explore() on the same cache is in flight');
   }
   cache.exploring = true;
   try {

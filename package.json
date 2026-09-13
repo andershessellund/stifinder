@@ -1,5 +1,5 @@
 {
-  "name": "spor",
+  "name": "stifinder",
   "version": "0.0.1",
   "license": "Apache-2.0",
   "author": "Anders Hessellund Jensen",
@@ -15,10 +15,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/andershessellund/spor.git"
+    "url": "git+https://github.com/andershessellund/stifinder.git"
   },
-  "bugs": "https://github.com/andershessellund/spor/issues",
-  "homepage": "https://github.com/andershessellund/spor#readme",
+  "bugs": "https://github.com/andershessellund/stifinder/issues",
+  "homepage": "https://github.com/andershessellund/stifinder#readme",
   "sideEffects": false,
   "type": "module",
   "exports": {

@@ -1,10 +1,10 @@
-# spor
+# stifinder
 
 **Tracks down the shortest, least-surprising failure.** Budget-bounded,
 iteratively deepened state-space exploration for JavaScript:
 
 ```ts
-import { StateSpaceCache, exploreIteratively } from 'spor';
+import { StateSpaceCache, exploreIteratively } from 'stifinder';
 
 // Two counters advanced by a scheduler that prefers to keep them level.
 const cache = new StateSpaceCache({
@@ -31,16 +31,16 @@ space.maxDeviationsReached;
 // 2 — budgets 0 and 1 were exhausted without a failure; budget 2 is the first that fails
 ```
 
-*Spor* is Danish for "trace" or "track" (*at spore*: to track down), and that
-is what the library produces: the trace to a violation that needs the fewest
-departures from the expected schedule. It is the search core of a
+*Stifinder* is Danish for "pathfinder" (*sti*: path), and that is what the
+library is: it finds the path to a violation that needs the fewest departures
+from the expected schedule. It is the search core of a
 deterministic-simulation test harness, kept independent of any particular
 system under test. States and events are whatever you hand it; equality and
 hashing come from [`valsem`](https://github.com/andershessellund/valsem), so
 structurally equal states are explored once.
 
 ```bash
-npm install spor valsem
+npm install stifinder valsem
 ```
 
 > `valsem` is a peer dependency. The explorer keys its caches by structural
@@ -88,7 +88,7 @@ steps for its cost.
 Deviation budgets are *delay bounding* (Emmi, Qadeer & Rakamarić,
 "Delay-bounded scheduling", POPL 2011), which generalizes the preemption
 bounding of CHESS: a deterministic scheduler with a bounded number of
-departures from its default choice. `spor` keeps that idea and adds a
+departures from its default choice. `stifinder` keeps that idea and adds a
 vector of user-defined cost dimensions, tracked as a Pareto frontier per
 state, plus a cache that survives changes of budget so iterative deepening
 never repeats work.
