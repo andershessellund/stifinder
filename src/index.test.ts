@@ -79,8 +79,9 @@ function expectConsistent<State, Event>(analysis: CacheAnalysis<State, Event>): 
   }
   expect(recomputed).not.toBeNull();
   expect(recomputed!.error).toEqual(analysis.violation.error);
-  expect(recomputed!.steps.map((s) => [s.state, s.cost, s.event])).toEqual(
-    analysis.violation.steps.map((s) => [s.state, s.cost, s.event]),
+  expect(recomputed!.cost).toBe(analysis.violation.cost); // interned: equal vectors are identical
+  expect(recomputed!.steps.map((s) => [s.state, s.cost, s.event, s.index])).toEqual(
+    analysis.violation.steps.map((s) => [s.state, s.cost, s.event, s.index]),
   );
 }
 
@@ -158,6 +159,7 @@ describe('exploreIteratively', () => {
     });
     const space = await exploreIteratively(cache);
     expect(space.violation?.steps.map((s) => s.event)).toEqual(['tick-a', 'tick-a', 'tick-a']);
+    expect(space.violation?.steps.map((s) => s.index)).toEqual([0, 1, 1]);
     expect(space.maxDeviationsReached).toBe(2);
     expectConsistent(space);
   });
@@ -508,5 +510,44 @@ describe('regressions', () => {
     expectConsistent(space);
     const recomputed = shortestViolation(space)!;
     expect(recomputed.steps.map((s) => Object.fromEntries(s.cost.entries()))).toEqual([{}, {}]);
+  });
+
+  it('a violation reports its whole cost, the failing event included', async () => {
+    // The failing step is both a deviation and a `c`. Every step's `cost` is
+    // the cost BEFORE it, so without `violation.cost` neither charge shows.
+    const cache = new StateSpaceCache(
+      graph('0', { '0': [['a', [], '1'], ['b', ['c'], '2']], '1': [['a', [], '2'], ['b', ['c', 'c'], '!x']] }),
+    );
+    const space = await exploreIteratively(cache, { baseBudget: { c: 2 } });
+    expect(space.violation!.steps.map((s) => Object.fromEntries(s.cost.entries()))).toEqual([{}, {}]);
+    expect(Object.fromEntries(space.violation!.cost.entries())).toEqual({ c: 2, [DEVIATIONS_KEY]: 1 });
+    expectConsistent(space);
+  });
+
+  it('violation steps carry the index of their event: 0 for the baseline, else a deviation', async () => {
+    // The only failure is two deviations deep, with a baseline step between them.
+    const space = await exploreIteratively(
+      new StateSpaceCache(
+        graph('0', {
+          '0': [['stay', [], 'end'], ['skip', [], 'end'], ['stray', [], '1']],
+          '1': [['on', [], '2']],
+          '2': [['fine', [], 'end'], ['crash', [], '!crash']],
+        }),
+      ),
+    );
+    expect(space.violation!.steps.map((s) => [s.event, s.index])).toEqual([['stray', 2], ['on', 0], ['crash', 1]]);
+    // One deviation per non-baseline step, whatever its index.
+    expect(space.violation!.cost.get(DEVIATIONS_KEY)).toBe(2);
+    expectConsistent(space);
+  });
+
+  it('an event listed twice is reported at the index it was taken at', async () => {
+    // `go` is the baseline at index 0 and listed again at index 1: one edge,
+    // computed once, reachable at two costs. The cheap arrival is the baseline.
+    const config = graph('0', { '0': [['go', [], '1'], ['go', [], '1']], '1': [['crash', [], '!crash']] });
+    const space = await exploreIteratively(new StateSpaceCache(config));
+    expect(space.violation!.steps.map((s) => [s.event, s.index])).toEqual([['go', 0], ['crash', 0]]);
+    expect(space.violation!.cost.size).toBe(0);
+    expectConsistent(space);
   });
 });

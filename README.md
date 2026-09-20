@@ -26,7 +26,9 @@ const cache = new StateSpaceCache({
 
 const space = await exploreIteratively(cache);
 space.violation?.steps.map((s) => s.event);
-// ['tick-a', 'tick-a', 'tick-a'] — the error needs the scheduler to stray twice
+// ['tick-a', 'tick-a', 'tick-a']
+space.violation?.steps.map((s) => s.index);
+// [0, 1, 1] — the first tick is the expected one; the error needs the scheduler to stray twice
 space.maxDeviationsReached;
 // 2 — budgets 0 and 1 were exhausted without a failure; budget 2 is the first that fails
 ```
@@ -128,9 +130,13 @@ never repeats work.
   from the transition table alone. On an unedited analysis it agrees with
   `analysis.violation`, which is much cheaper.
 
-A violation is `{ steps, error }`, where each step is
-`{ state, cost, event }`: the event applied at `state`, and the cost
-accumulated from the initial state to reach `state`.
+A violation is `{ steps, cost, error }`, where each step is
+`{ state, cost, event, index }`: the event applied at `state`, its position
+in `getEvents(state)` (0 is the baseline, anything else was charged a
+deviation), and the cost accumulated from the initial state to reach `state`.
+A step's `cost` is the cost *before* it; the violation's own `cost` is the
+cost of the whole path, the failing event included: a budget finds this
+path exactly when it allows that much.
 
 ### Options
 
