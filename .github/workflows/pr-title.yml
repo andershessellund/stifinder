@@ -1,0 +1,50 @@
+name: PR title
+
+# main takes squash merges only, and the PR title becomes the commit on main —
+# the line release-please reads to choose the version bump and write the
+# changelog. So the title is what must be a Conventional Commit:
+#   fix: …   feat: …   feat!: …   docs: / ci: / chore: / refactor: / test: / perf: / build:
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional:
+    name: conventional PR title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The squash commit is the PR title only (a repository setting). Beyond the
+  # title, release-please reads one thing: an override block in the PR
+  # description. What it cannot parse it drops from the changelog and the
+  # version calculation, silently, and a BREAKING CHANGE or Release-As footer
+  # written in the description outside such a block never reaches it at all.
+  # This runs release-please's own parser over both. See the script.
+  release-notes:
+    name: release notes can be generated
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/check-commit-message.mjs
+        env:
+          # Passed through the environment, never interpolated into the
+          # command: a PR title is attacker-controlled text.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}

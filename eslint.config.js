@@ -13,5 +13,6 @@ export default tseslint.config(
       '@typescript-eslint/require-await': 'off',
     },
   },
-  { files: ['*.js'], ...tseslint.configs.disableTypeChecked },
+  // Plain JavaScript (this file, scripts/) is in no tsconfig project.
+  { files: ['**/*.js', '**/*.mjs'], ...tseslint.configs.disableTypeChecked },
 );
