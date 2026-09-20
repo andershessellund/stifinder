@@ -6,8 +6,8 @@
 //   1. `StateSpaceCache<State, Event>` — a mutable, budget-independent cache
 //      of (state -> events), (state, event -> result), every (state, cost)
 //      pair reached so far with its predecessor, and the pending edges not
-//      yet traversed. Owns the `ExplorerConfig` so a cache can never be
-//      mixed with another config. Reusable across many `explore()` calls;
+//      yet traversed. Owns the `Model` so a cache can never be mixed
+//      with another model. Reusable across many `explore()` calls;
 //      the expensive work is `applyEvent` invocations and they are never
 //      repeated.
 //
@@ -17,12 +17,12 @@
 //      onto a budget: reachable states with their Pareto-minimum costs, the
 //      transitions between them, and the shortest violation path.
 //
-// `exploreIteratively(cache, options?)` calls `explore` with deviation
-// budgets 0, 1, 2, … up to a cap, stopping at the first budget that
-// exhibits a violation. This produces the minimum-deviation violation
+// `exploreIteratively(cacheOrModel, options?)` calls `explore` with
+// deviation budgets 0, 1, 2, … up to a cap, stopping at the first budget
+// that exhibits a violation. This produces the minimum-deviation violation
 // trace.
 //
-// `exploreOnce(config, budget, options?)` constructs a fresh cache,
+// `exploreOnce(model, budget, options?)` constructs a fresh cache,
 // explores, analyzes, and discards it.
 //
 // Deviation semantics
@@ -75,13 +75,18 @@ export interface EventDescriptor<Event> {
   event: Event;
   /**
    * Budget keys this event consumes, one unit per occurrence (a key listed
-   * twice costs two units). Must not include `__deviations__`; the
-   * explorer throws if it does.
+   * twice costs two units). Omitted means none. Must not include
+   * `__deviations__`; the explorer throws if it does.
    */
-  cost: readonly string[];
+  cost?: readonly string[];
 }
 
-export interface ExplorerConfig<State, Event> {
+/**
+ * A system described for exploration: where it starts, what can happen in
+ * a state, and what each event does. Both callbacks may be synchronous or
+ * return a promise.
+ */
+export interface Model<State, Event> {
   initialState: State;
   /**
    * Return the events to consider from `state`, in preference order
@@ -92,7 +97,7 @@ export interface ExplorerConfig<State, Event> {
    * Must be a pure function of `state`: results are memoized for the
    * lifetime of the cache.
    */
-  getEvents(state: State): Promise<EventDescriptor<Event>[]>;
+  getEvents(state: State): EventDescriptor<Event>[] | Promise<EventDescriptor<Event>[]>;
   /**
    * Apply an event to a state. Return `{ to }` for the successor state or
    * `{ error }` for a safety violation. Throwing is treated as `{ error }`.
@@ -100,8 +105,11 @@ export interface ExplorerConfig<State, Event> {
    * Must be a pure function of `(state, event)`: results are memoized for
    * the lifetime of the cache.
    */
-  applyEvent(state: State, event: Event): Promise<ApplyResult<State>>;
+  applyEvent(state: State, event: Event): ApplyResult<State> | Promise<ApplyResult<State>>;
 }
+
+/** @deprecated The old name of {@link Model}. */
+export type ExplorerConfig<State, Event> = Model<State, Event>;
 
 /** One computed edge out of a state, as listed by `analyzeCache`. */
 export type BaseTransition<State, Event> =
@@ -134,8 +142,15 @@ export interface ViolationPath<State, Event> {
  *  `analyzeCache(cache, budget)` whenever the projection is actually needed. */
 export interface ExploreResult {
   /** True if the BFS exhausted all affordable pending edges; false if
-   *  stopped early due to timeout or `maxEdges`. */
+   *  stopped early due to timeout or `maxEdges`. True says nothing about
+   *  what a larger budget would reach: see `exhaustive`. */
   completed: boolean;
+  /** True iff no edge is left to traverse at ANY budget: every state the
+   *  model can reach has been explored, however many deviations or units of
+   *  any cost key it takes. Together with `violation: null` that is a proof
+   *  that the model has no violation; `completed` alone only clears the
+   *  budget that was explored. */
+  exhaustive: boolean;
   timedOut: boolean;
   /** Edges (i.e. `applyEvent` calls) computed during *this* call (cache misses only). */
   edgesAddedThisRun: number;
@@ -204,6 +219,7 @@ export const DEFAULT_MAX_DEVIATIONS = 100;
 // ---------------------------------------------------------------------------
 
 const EMPTY_COST: CostVector = ValueMap.empty<string, number>();
+const NO_COST_KEYS: readonly string[] = Object.freeze([]);
 
 function costSum(c: CostVector): number {
   let sum = 0;
@@ -281,7 +297,7 @@ export interface PendingEdge<State, Event> {
 
 /**
  * Mutable, budget-independent cache of explorer outputs. Owns the
- * `ExplorerConfig` so the cache can never be mixed with another config.
+ * `Model` so the cache can never be mixed with another model.
  *
  * Safe to share across many sequential `explore()` calls with different
  * budgets — a richer budget can only enable additional transitions, never
@@ -289,10 +305,11 @@ export interface PendingEdge<State, Event> {
  * are rejected.
  */
 export class StateSpaceCache<State, Event> {
-  readonly config: ExplorerConfig<State, Event>;
+  readonly config: Model<State, Event>;
   /** Canonical (interned) form of `config.initialState`. */
   readonly initialState: State;
-  readonly events = new HashMap<State, EventDescriptor<Event>[]>();
+  /** `getEvents` results, with an omitted `cost` filled in as `[]`. */
+  readonly events = new HashMap<State, Required<EventDescriptor<Event>>[]>();
   readonly apply = new HashMap<State, HashMap<Event, ApplyResult<State>>>();
   /** Cumulative `applyEvent` invocations (cache misses) across all calls. */
   edgesComputed = 0;
@@ -329,9 +346,15 @@ export class StateSpaceCache<State, Event> {
   /** @internal Set while an `explore()` call is in flight. */
   exploring = false;
 
-  constructor(config: ExplorerConfig<State, Event>) {
+  constructor(config: Model<State, Event>) {
     this.config = config;
     this.initialState = intern(config.initialState);
+  }
+
+  /** True iff exploration has started and no edge is left to traverse at
+   *  any budget: the whole reachable state space is in the cache. */
+  get exhaustive(): boolean {
+    return this.reached.size > 0 && this.pending.size === 0 && this.deferred.length === 0;
   }
 
   /** Number of distinct states for which `getEvents` has been computed. */
@@ -339,10 +362,10 @@ export class StateSpaceCache<State, Event> {
     return this.events.size;
   }
 
-  async getEvents(state: State): Promise<EventDescriptor<Event>[]> {
+  async getEvents(state: State): Promise<Required<EventDescriptor<Event>>[]> {
     const cached = this.events.get(state);
     if (cached !== undefined) { this.getEventsCacheHits++; return cached; }
-    const fresh = await this.config.getEvents(state);
+    const fresh = (await this.config.getEvents(state)).map((ev) => ({ event: ev.event, cost: ev.cost ?? NO_COST_KEYS }));
     for (const ev of fresh) {
       if (ev.cost.includes(DEVIATIONS_KEY)) {
         throw new Error(`stifinder: event cost must not include the reserved key ${DEVIATIONS_KEY}`);
@@ -587,6 +610,7 @@ async function exploreLocked<State, Event>(
 
   return {
     completed: !timedOut && !stoppedEarly,
+    exhaustive: cache.exhaustive,
     timedOut,
     edgesAddedThisRun: cache.edgesComputed - edgesAtStart,
     edgesComputed: cache.edgesComputed,
@@ -630,9 +654,12 @@ export function analyzeCache<State, Event>(
 // ---------------------------------------------------------------------------
 
 export async function exploreIteratively<State, Event>(
-  cache: StateSpaceCache<State, Event>,
+  cacheOrModel: StateSpaceCache<State, Event> | Model<State, Event>,
   options?: IterativeOptions,
 ): Promise<StateSpace<State, Event>> {
+  // A bare model gets a cache for the length of this run. Pass a cache to
+  // keep it: to resume a run that hit a limit, or to analyze other budgets.
+  const cache = cacheOrModel instanceof StateSpaceCache ? cacheOrModel : new StateSpaceCache(cacheOrModel);
   const maxDeviations = options?.maxDeviations ?? DEFAULT_MAX_DEVIATIONS;
   const stopOnViolation = options?.stopOnViolation ?? true;
   const baseBudget: BudgetVector = toBudget(options?.baseBudget ?? EMPTY_COST).delete(DEVIATIONS_KEY);
@@ -656,9 +683,9 @@ export async function exploreIteratively<State, Event>(
     maxDeviationsReached = d;
     // Cheap violation existence check: O(|errorEdges|), no projection.
     if (stopOnViolation && findShortestViolation(cache, budget) !== null) break;
-    // Nothing pending or deferred: the entire reachable state space (under
-    // any deviation budget at this non-deviation budget) has been explored.
-    if (cache.pending.size === 0 && cache.deferred.length === 0) break;
+    // Nothing pending or deferred: the entire reachable state space has
+    // been explored, and no larger budget can find anything more.
+    if (result.exhaustive) break;
   }
 
   // Guarantee a non-null lastResult even if maxDeviations < 0 (defensive).
@@ -675,7 +702,7 @@ export async function exploreIteratively<State, Event>(
 // ---------------------------------------------------------------------------
 
 export async function exploreOnce<State, Event>(
-  config: ExplorerConfig<State, Event>,
+  config: Model<State, Event>,
   budget: BudgetLike,
   options?: ExploreOptions,
 ): Promise<ExploreResult & CacheAnalysis<State, Event>> {

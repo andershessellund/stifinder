@@ -4,27 +4,26 @@
 iteratively deepened state-space exploration for JavaScript:
 
 ```ts
-import { StateSpaceCache, exploreIteratively } from 'stifinder';
+import { exploreIteratively } from 'stifinder';
 
 // Two counters advanced by a scheduler that prefers to keep them level.
-const cache = new StateSpaceCache({
+const space = await exploreIteratively({
   initialState: { a: 0, b: 0 },
-  async getEvents(s) {
+  getEvents(s) {
     if (s.a + s.b >= 6) return []; // six ticks per run
     // Preference order: index 0 is what the fair scheduler would do next;
     // anything else is a deviation from the expected schedule.
     return s.a > s.b
-      ? [{ event: 'tick-b', cost: [] }, { event: 'tick-a', cost: [] }]
-      : [{ event: 'tick-a', cost: [] }, { event: 'tick-b', cost: [] }];
+      ? [{ event: 'tick-b' }, { event: 'tick-a' }]
+      : [{ event: 'tick-a' }, { event: 'tick-b' }];
   },
-  async applyEvent(s, e) {
+  applyEvent(s, e) {
     const next = e === 'tick-a' ? { ...s, a: s.a + 1 } : { ...s, b: s.b + 1 };
     if (next.a - next.b > 2) return { error: new Error('a ran too far ahead') };
     return { to: next };
   },
 });
 
-const space = await exploreIteratively(cache);
 space.violation?.steps.map((s) => s.event);
 // ['tick-a', 'tick-a', 'tick-a']
 space.violation?.steps.map((s) => s.index);
@@ -51,7 +50,8 @@ npm install stifinder valsem
 
 ## The model
 
-You describe a system as two async callbacks:
+You describe a system as a `Model<State, Event>`: an `initialState` and two
+callbacks, each of which may be synchronous or return a promise.
 
 - **`getEvents(state)`** returns the events worth considering from a state,
   in *preference order*. Index 0 is the baseline, the thing that "should"
@@ -60,8 +60,9 @@ You describe a system as two async callbacks:
 - **`applyEvent(state, event)`** returns `{ to: nextState }` or
   `{ error }`. Throwing counts as an error.
 
-Each event may also list explicit **cost keys** (`cost: ['crash', 'retry']`).
-A key listed twice costs two units. A budget is a vector of per-key
+Each event may also list explicit **cost keys**
+(`{ event, cost: ['crash', 'retry'] }`); leaving `cost` out means none. A key
+listed twice costs two units. A budget is a vector of per-key
 allowances, and exploration only follows paths whose accumulated cost stays
 within it. Deviation counting is automatic; other keys are yours to define.
 Listing `__deviations__` as a cost key is an error.
@@ -77,6 +78,22 @@ Two requirements, both consequences of caching:
   an unregistered class instance is rejected. See valsem's guide on
   [extending](https://github.com/andershessellund/valsem#extending) for
   making your own classes values.
+
+## Reading a result
+
+A search that finds nothing has cleared a budget, not the model, unless it
+ran out of things to explore. `exhaustive` says which:
+
+| `violation` | `exhaustive` | `completed` | What you know |
+| --- | --- | --- | --- |
+| set | | | This is the cheapest violation there is (see below). |
+| `null` | `true` | `true` | **There is no violation.** Every reachable state was explored, at every budget. |
+| `null` | `false` | `true` | None within `maxDeviationsReached` deviations and the `baseBudget`. More budget may find one. |
+| `null` | `false` | `false` | The run hit `maxEdges` or `timeoutMs`. Budgets up to `maxDeviationsReached` are clear. |
+
+`completed: true` with `violation: null` reads like a proof and is not one: it
+is also what a run capped at `maxDeviations: 3` reports about a failure that
+needs four.
 
 ## Which violation is reported
 
@@ -99,7 +116,7 @@ never repeats work.
 
 ### Two layers
 
-1. **`StateSpaceCache<State, Event>`** owns an `ExplorerConfig` and memoizes
+1. **`StateSpaceCache<State, Event>`** owns a `Model` and memoizes
    `getEvents` and `applyEvent` results, every (state, cost) pair reached
    with its predecessor, and the edges not yet traversed. It is
    budget-independent and reusable across many searches in any order of
@@ -107,18 +124,20 @@ never repeats work.
    `explore` at a time; a concurrent call is rejected.
 2. **`explore(cache, budget, options?)`** runs one budget-bounded BFS,
    filling the cache as a side effect. Returns an `ExploreResult` with
-   `completed`, `timedOut`, and edge counts.
+   `completed`, `exhaustive`, `timedOut`, and edge counts.
 
 ### Helpers
 
-- **`exploreIteratively(cache, options?)`** calls `explore` with deviation
-  budgets 0, 1, 2, … up to `maxDeviations`, stopping at the first budget
-  that exhibits a violation (unless `stopOnViolation: false`) or once
+- **`exploreIteratively(cacheOrModel, options?)`** calls `explore` with
+  deviation budgets 0, 1, 2, … up to `maxDeviations`, stopping at the first
+  budget that exhibits a violation (unless `stopOnViolation: false`) or once
   nothing is left to explore. Returns a `StateSpace`: the `ExploreResult`,
   the projection at the last budget attempted (`costs`, `transitions`,
   `violation`), and `maxDeviationsReached`, the highest budget that
-  completed.
-- **`exploreOnce(config, budget, options?)`** builds a fresh cache, explores,
+  completed. Given a model, it uses a cache of its own; pass a
+  `StateSpaceCache` to keep it, to resume a run that hit a limit or to
+  analyze other budgets afterwards.
+- **`exploreOnce(model, budget, options?)`** builds a fresh cache, explores,
   analyzes, and discards it.
 - **`analyzeCache(cache, budget)`** projects the cache onto a budget without
   exploring: reachable states with their Pareto-minimum costs, the computed
