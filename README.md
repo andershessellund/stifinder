@@ -50,8 +50,9 @@ npm install stifinder valsem
 
 ## The model
 
-You describe a system as a `Model<State, Event>`: an `initialState` and two
-callbacks, each of which may be synchronous or return a promise.
+You describe a system as a `Model<State, Event>`: an `initialState`, two
+callbacks, and optionally a third. Each may be synchronous or return a
+promise.
 
 - **`getEvents(state)`** returns the events worth considering from a state,
   in *preference order*. Index 0 is the baseline, the thing that "should"
@@ -59,6 +60,16 @@ callbacks, each of which may be synchronous or return a promise.
   `__deviations__` budget.
 - **`applyEvent(state, event)`** returns `{ to: nextState }` or
   `{ error }`. Throwing counts as an error.
+- **`invariant(state)`**, optional, returns `{ error }` for a state that must
+  never be reached, and nothing for one that is fine. Throwing counts as an
+  error here too. It is checked once per distinct state, the initial state
+  included, and nothing is explored beyond a state that fails.
+
+An error can so come from either side. `applyEvent` is where the system under
+test fails *while doing something*: it threw, and there is no next state.
+`invariant` is where a state is wrong *in itself*, whichever event led there:
+two leaders, a negative balance, nobody able to move. The violation then
+carries that state as `badState`.
 
 Each event may also list explicit **cost keys**
 (`{ event, cost: ['crash', 'retry'] }`); leaving `cost` out means none. A key
@@ -69,7 +80,7 @@ Listing `__deviations__` as a cost key is an error.
 
 Two requirements, both consequences of caching:
 
-- **Both callbacks must be pure functions of their arguments.** Results are
+- **Every callback must be a pure function of its arguments.** Results are
   memoized for the lifetime of a cache, so a callback that consults a clock,
   a random source, or mutable state outside the model silently produces a
   wrong state space.
@@ -149,13 +160,16 @@ never repeats work.
   from the transition table alone. On an unedited analysis it agrees with
   `analysis.violation`, which is much cheaper.
 
-A violation is `{ steps, cost, error }`, where each step is
+A violation is `{ steps, cost, error, badState? }`, where each step is
 `{ state, cost, event, index }`: the event applied at `state`, its position
 in `getEvents(state)` (0 is the baseline, anything else was charged a
 deviation), and the cost accumulated from the initial state to reach `state`.
 A step's `cost` is the cost *before* it; the violation's own `cost` is the
 cost of the whole path, the failing event included: a budget finds this
-path exactly when it allows that much.
+path exactly when it allows that much. `badState` is present when the error
+is a state failing the `invariant`: the state the last step led to, or the
+initial state, in which case `steps` is empty. Both kinds of error are
+ordered together, so the cheapest violation is reported whichever it is.
 
 ### Options
 
