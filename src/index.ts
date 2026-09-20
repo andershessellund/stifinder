@@ -115,10 +115,17 @@ export interface ViolationStep<State, Event> {
   /** Cost accumulated from the initial state to `state` (deviations included). */
   cost: CostVector;
   event: Event;
+  /** Position of `event` in `getEvents(state)`. 0 is the baseline; any
+   *  other index is a step that was charged a deviation. */
+  index: number;
 }
 
 export interface ViolationPath<State, Event> {
   steps: ViolationStep<State, Event>[];
+  /** Cost of the whole path, the failing event included: what a budget
+   *  must allow for this violation to be found. `steps[k].cost` is the cost
+   *  before step `k`; this is the cost after the last one. */
+  cost: CostVector;
   error: unknown;
 }
 
@@ -231,6 +238,8 @@ export interface PredecessorEntry<State, Event> {
   from: State;
   fromCost: CostVector;
   event: Event;
+  /** Position of `event` in `getEvents(from)`. */
+  index: number;
 }
 
 /** One arrival at a (state, cost) pair. */
@@ -247,6 +256,8 @@ export interface ErrorEdgeEntry<State, Event> {
   /** Cost-to-reach `from` at the moment this edge was applied. */
   fromCost: CostVector;
   event: Event;
+  /** Position of `event` in `getEvents(from)`. */
+  index: number;
   /** Total cost to traverse this edge from the initial state
    *  (= `fromCost` + edge cost + optional deviation). */
   totalCost: CostVector;
@@ -262,6 +273,8 @@ export interface PendingEdge<State, Event> {
   from: State;
   fromCost: CostVector;
   event: Event;
+  /** Position of `event` in `getEvents(from)`. */
+  index: number;
   cost: CostVector;
   depth: number;
 }
@@ -483,7 +496,7 @@ async function exploreLocked<State, Event>(
     for (let k = 0; k < events.length; k++) {
       const ev = events[k]!;
       const successorCost = addCost(cost, ev.cost, k !== 0);
-      pushPending({ from: state, fromCost: cost, event: ev.event, cost: successorCost, depth: depth + 1 });
+      pushPending({ from: state, fromCost: cost, event: ev.event, index: k, cost: successorCost, depth: depth + 1 });
     }
   };
 
@@ -547,6 +560,7 @@ async function exploreLocked<State, Event>(
             from: item.from,
             fromCost: item.fromCost,
             event: item.event,
+            index: item.index,
             totalCost: item.cost,
             depth: item.depth,
             error: result.error,
@@ -558,6 +572,7 @@ async function exploreLocked<State, Event>(
           from: item.from,
           fromCost: item.fromCost,
           event: item.event,
+          index: item.index,
         });
         if (added !== null) {
           await seedPending(result.to, item.cost, item.depth);
@@ -771,19 +786,19 @@ function findShortestViolation<State, Event>(
   // Reconstruct path: walk predecessors back from `best.from` at cost
   // `best.fromCost` to the initial state, then prepend each step.
   const steps: ViolationStep<State, Event>[] = [
-    { state: best.from, cost: best.fromCost, event: best.event },
+    { state: best.from, cost: best.fromCost, event: best.event, index: best.index },
   ];
   let curState: State = best.from;
   let curCost: CostVector = best.fromCost;
   for (;;) {
     const pred = cache.reached.get(curState)?.get(curCost)?.pred;
     if (pred === undefined || pred === null) break; // unknown (impossible) or initial state
-    steps.unshift({ state: pred.from, cost: pred.fromCost, event: pred.event });
+    steps.unshift({ state: pred.from, cost: pred.fromCost, event: pred.event, index: pred.index });
     curState = pred.from;
     curCost = pred.fromCost;
   }
 
-  return { steps, error: best.error };
+  return { steps, cost: best.totalCost, error: best.error };
 }
 
 /**
@@ -808,7 +823,7 @@ function shortestViolationFromTransitions<State, Event>(
   transitions: HashMap<State, BaseTransition<State, Event>[]>,
 ): ViolationPath<State, Event> | null {
   type Node = { state: State; cost: CostVector };
-  type Parent = { from: Node; event: Event } | null;
+  type Parent = { from: Node; event: Event; index: number } | null;
   const parents = new HashMap<Node, Parent>();
   const queue: Node[] = [];
 
@@ -819,7 +834,8 @@ function shortestViolationFromTransitions<State, Event>(
   // Plain BFS visits nodes in depth order; among violations found, keep
   // the lexicographically best (devs, sum, depth). Depth is the BFS layer,
   // so the first violation seen at a given (devs, sum) is the shortest.
-  let best: { node: Node; event: Event; error: unknown; devs: number; sum: number } | null = null;
+  type Best = { node: Node; event: Event; index: number; cost: CostVector; error: unknown; devs: number; sum: number };
+  let best: Best | null = null;
 
   for (let qi = 0; qi < queue.length; qi++) {
     const current = queue[qi]!;
@@ -834,14 +850,14 @@ function shortestViolationFromTransitions<State, Event>(
         const devs = cost.get(DEVIATIONS_KEY) ?? 0;
         const sum = costSum(cost);
         if (best === null || devs < best.devs || (devs === best.devs && sum < best.sum)) {
-          best = { node: current, event: t.event, error: t.error, devs, sum };
+          best = { node: current, event: t.event, index: t.index, cost, error: t.error, devs, sum };
         }
         continue;
       }
 
       const successor: Node = { state: t.to, cost };
       if (!parents.has(successor)) {
-        parents.set(successor, { from: current, event: t.event });
+        parents.set(successor, { from: current, event: t.event, index: t.index });
         queue.push(successor);
       }
     }
@@ -849,14 +865,14 @@ function shortestViolationFromTransitions<State, Event>(
 
   if (best === null) return null;
   const steps: ViolationStep<State, Event>[] = [
-    { state: best.node.state, cost: best.node.cost, event: best.event },
+    { state: best.node.state, cost: best.node.cost, event: best.event, index: best.index },
   ];
   let node: Node = best.node;
   for (;;) {
     const parent = parents.get(node)!;
     if (parent === null) break;
-    steps.unshift({ state: parent.from.state, cost: parent.from.cost, event: parent.event });
+    steps.unshift({ state: parent.from.state, cost: parent.from.cost, event: parent.event, index: parent.index });
     node = parent.from;
   }
-  return { steps, error: best.error };
+  return { steps, cost: best.cost, error: best.error };
 }
