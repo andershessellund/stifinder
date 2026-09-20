@@ -3,6 +3,7 @@ import {
   type CacheAnalysis,
   type EventDescriptor,
   type ExplorerConfig,
+  type Model,
   DEVIATIONS_KEY,
   StateSpaceCache,
   analyzeCache,
@@ -79,8 +80,11 @@ function expectConsistent<State, Event>(analysis: CacheAnalysis<State, Event>): 
   }
   expect(recomputed).not.toBeNull();
   expect(recomputed!.error).toEqual(analysis.violation.error);
-  expect(recomputed!.steps.map((s) => [s.state, s.cost, s.event])).toEqual(
-    analysis.violation.steps.map((s) => [s.state, s.cost, s.event]),
+  expect(recomputed!.cost).toBe(analysis.violation.cost); // interned: equal vectors are identical
+  expect(recomputed!.badState).toEqual(analysis.violation.badState);
+  expect('badState' in recomputed!).toBe('badState' in analysis.violation);
+  expect(recomputed!.steps.map((s) => [s.state, s.cost, s.event, s.index])).toEqual(
+    analysis.violation.steps.map((s) => [s.state, s.cost, s.event, s.index]),
   );
 }
 
@@ -110,6 +114,7 @@ describe('exploreIteratively', () => {
     expect(space.violation).toBeNull();
     expectConsistent(space);
     expect(space.maxDeviationsReached).toBeGreaterThanOrEqual(3);
+    expect(space.exhaustive).toBe(true);
     expect(cache.pending.size).toBe(0);
     expect(cache.deferred).toHaveLength(0);
   });
@@ -142,22 +147,20 @@ describe('exploreIteratively', () => {
   });
 
   it('reproduces the README example', async () => {
-    const cache = new StateSpaceCache<{ a: number; b: number }, string>({
+    const space = await exploreIteratively<{ a: number; b: number }, string>({
       initialState: { a: 0, b: 0 },
-      async getEvents(s) {
+      getEvents(s) {
         if (s.a + s.b >= 6) return [];
-        return s.a > s.b
-          ? [{ event: 'tick-b', cost: [] }, { event: 'tick-a', cost: [] }]
-          : [{ event: 'tick-a', cost: [] }, { event: 'tick-b', cost: [] }];
+        return s.a > s.b ? [{ event: 'tick-b' }, { event: 'tick-a' }] : [{ event: 'tick-a' }, { event: 'tick-b' }];
       },
-      async applyEvent(s, e) {
+      applyEvent(s, e) {
         const next = e === 'tick-a' ? { ...s, a: s.a + 1 } : { ...s, b: s.b + 1 };
         if (next.a - next.b > 2) return { error: new Error('a ran too far ahead') };
         return { to: next };
       },
     });
-    const space = await exploreIteratively(cache);
     expect(space.violation?.steps.map((s) => s.event)).toEqual(['tick-a', 'tick-a', 'tick-a']);
+    expect(space.violation?.steps.map((s) => s.index)).toEqual([0, 1, 1]);
     expect(space.maxDeviationsReached).toBe(2);
     expectConsistent(space);
   });
@@ -382,6 +385,7 @@ describe('limits', () => {
     expect(space.completed).toBe(false);
     expect(space.timedOut).toBe(false);
     expect(space.edgesComputed).toBe(4);
+    expect(space.exhaustive).toBe(false);
     // Budget 0 needs 3 edges and completes; budget 1 runs out.
     expect(space.maxDeviationsReached).toBe(0);
     expect(space.budget.get(DEVIATIONS_KEY)).toBe(1);
@@ -508,5 +512,240 @@ describe('regressions', () => {
     expectConsistent(space);
     const recomputed = shortestViolation(space)!;
     expect(recomputed.steps.map((s) => Object.fromEntries(s.cost.entries()))).toEqual([{}, {}]);
+  });
+
+  it('a violation reports its whole cost, the failing event included', async () => {
+    // The failing step is both a deviation and a `c`. Every step's `cost` is
+    // the cost BEFORE it, so without `violation.cost` neither charge shows.
+    const cache = new StateSpaceCache(
+      graph('0', { '0': [['a', [], '1'], ['b', ['c'], '2']], '1': [['a', [], '2'], ['b', ['c', 'c'], '!x']] }),
+    );
+    const space = await exploreIteratively(cache, { baseBudget: { c: 2 } });
+    expect(space.violation!.steps.map((s) => Object.fromEntries(s.cost.entries()))).toEqual([{}, {}]);
+    expect(Object.fromEntries(space.violation!.cost.entries())).toEqual({ c: 2, [DEVIATIONS_KEY]: 1 });
+    expectConsistent(space);
+  });
+
+  it('violation steps carry the index of their event: 0 for the baseline, else a deviation', async () => {
+    // The only failure is two deviations deep, with a baseline step between them.
+    const space = await exploreIteratively(
+      new StateSpaceCache(
+        graph('0', {
+          '0': [['stay', [], 'end'], ['skip', [], 'end'], ['stray', [], '1']],
+          '1': [['on', [], '2']],
+          '2': [['fine', [], 'end'], ['crash', [], '!crash']],
+        }),
+      ),
+    );
+    expect(space.violation!.steps.map((s) => [s.event, s.index])).toEqual([['stray', 2], ['on', 0], ['crash', 1]]);
+    // One deviation per non-baseline step, whatever its index.
+    expect(space.violation!.cost.get(DEVIATIONS_KEY)).toBe(2);
+    expectConsistent(space);
+  });
+
+  it('an event listed twice is reported at the index it was taken at', async () => {
+    // `go` is the baseline at index 0 and listed again at index 1: one edge,
+    // computed once, reachable at two costs. The cheap arrival is the baseline.
+    const config = graph('0', { '0': [['go', [], '1'], ['go', [], '1']], '1': [['crash', [], '!crash']] });
+    const space = await exploreIteratively(new StateSpaceCache(config));
+    expect(space.violation!.steps.map((s) => [s.event, s.index])).toEqual([['go', 0], ['crash', 0]]);
+    expect(space.violation!.cost.size).toBe(0);
+    expectConsistent(space);
+  });
+});
+
+describe('exhaustive: what a result without a violation proves', () => {
+  // The only failure is two deviations deep.
+  const twoDeep = () =>
+    graph('0', { '0': [['ok', [], 'end'], ['stray', [], '1']], '1': [['ok', [], 'end'], ['crash', [], '!crash']] });
+
+  it('a run capped below the failure completes, finds nothing, and is not exhaustive', async () => {
+    const cache = new StateSpaceCache(twoDeep());
+    const capped = await exploreIteratively(cache, { maxDeviations: 1 });
+    // This is the result that reads like a proof and is not one.
+    expect(capped).toMatchObject({ completed: true, violation: null, maxDeviationsReached: 1, exhaustive: false });
+
+    const full = await exploreIteratively(cache);
+    expect(full.violation!.steps.map((s) => s.event)).toEqual(['stray', 'crash']);
+  });
+
+  it('is true once no edge is left at any budget, and only then', async () => {
+    const cache = new StateSpaceCache(graph('0', { '0': [['a', [], '1'], ['b', [], '2']], '1': [['a', [], '2']] }));
+    expect(cache.exhaustive).toBe(false); // nothing explored yet: no edges pending, and no proof either
+    expect((await explore(cache, { [DEVIATIONS_KEY]: 0 })).exhaustive).toBe(false); // `b` waits for a deviation
+    expect((await explore(cache, { [DEVIATIONS_KEY]: 1 })).exhaustive).toBe(true);
+    expect(cache.exhaustive).toBe(true);
+  });
+
+  it('an edge no deviation budget can afford keeps a run from being exhaustive', async () => {
+    // `locked` needs a `k` that the base budget never grants.
+    const config = graph('0', { '0': [['free', [], 'end'], ['locked', ['k'], '!behind the lock']] });
+    const without = await exploreIteratively(new StateSpaceCache(config), { maxDeviations: 3 });
+    expect(without).toMatchObject({ completed: true, violation: null, exhaustive: false });
+
+    const withKey = await exploreIteratively(new StateSpaceCache(config), { baseBudget: { k: 1 } });
+    expect(withKey.violation!.error).toBe('behind the lock');
+  });
+
+  it('can be true alongside a violation: an error edge leads nowhere further', async () => {
+    const space = await exploreIteratively(new StateSpaceCache(graph('0', { '0': [['crash', [], '!crash']] })));
+    expect(space.violation).not.toBeNull();
+    expect(space.exhaustive).toBe(true);
+  });
+
+  it('exploreOnce reports it for its one budget', async () => {
+    expect((await exploreOnce(twoDeep(), { [DEVIATIONS_KEY]: 1 })).exhaustive).toBe(false);
+    expect((await exploreOnce(twoDeep(), { [DEVIATIONS_KEY]: 2 })).exhaustive).toBe(true);
+  });
+});
+
+describe('describing a model', () => {
+  it('cost may be omitted, and means no cost keys', async () => {
+    const model: Model<string, string> = {
+      initialState: 'a',
+      getEvents: (state) => (state === 'a' ? [{ event: 'go' }, { event: 'pay', cost: ['k'] }] : []),
+      applyEvent: (_, event) => ({ to: event === 'go' ? 'b' : 'c' }),
+    };
+    const space = await exploreOnce(model, { [DEVIATIONS_KEY]: 1, k: 1 });
+    expect(space.transitions.get('a')).toEqual([
+      { event: 'go', index: 0, cost: [], to: 'b' },
+      { event: 'pay', index: 1, cost: ['k'], to: 'c' },
+    ]);
+    expect(Object.fromEntries(space.costs.get('c')![0]!.entries())).toEqual({ k: 1, [DEVIATIONS_KEY]: 1 });
+  });
+
+  it('callbacks may be synchronous, and a synchronous throw is an error result', async () => {
+    const space = await exploreIteratively<number, string>({
+      initialState: 0,
+      getEvents: (n) => (n < 3 ? [{ event: 'inc' }] : []),
+      applyEvent(n) {
+        if (n === 2) throw new Error('three is too many');
+        return { to: n + 1 };
+      },
+    });
+    expect(space.violation!.steps.map((s) => s.state)).toEqual([0, 1, 2]);
+    expect((space.violation!.error as Error).message).toBe('three is too many');
+  });
+
+  it('exploreIteratively takes a model directly, or a cache to keep', async () => {
+    const model = makeConfig({ heads: 0, tossesRemaining: 3 }, 2);
+    const direct = await exploreIteratively(model);
+    const cache = new StateSpaceCache(model);
+    const cached = await exploreIteratively(cache);
+    expect(direct.violation!.steps.map((s) => s.event)).toEqual(cached.violation!.steps.map((s) => s.event));
+    expect(direct.edgesComputed).toBe(cache.edgesComputed);
+  });
+
+  it('ExplorerConfig is still accepted: it is the old name of Model', async () => {
+    const config: ExplorerConfig<string, string> = graph('0', { '0': [['a', [], '1']] });
+    const model: Model<string, string> = config;
+    expect((await exploreIteratively(model)).exhaustive).toBe(true);
+  });
+});
+
+describe('invariant', () => {
+  /** `graph`, with every state whose name starts with `bad` failing the invariant. */
+  function guarded(initial: string, edges: Record<string, Edge[]>): Model<string, string> & { checked: string[] } {
+    const checked: string[] = [];
+    return {
+      ...graph(initial, edges),
+      checked,
+      invariant(state) {
+        checked.push(state);
+        return state.startsWith('bad') ? { error: `${state} must not be reached` } : undefined;
+      },
+    };
+  }
+
+  it('reaching a state that fails is a violation that ends at that state', async () => {
+    const space = await exploreIteratively(guarded('0', { '0': [['a', [], '1']], '1': [['b', [], 'bad']] }));
+    expect(space.violation).toMatchObject({ error: 'bad must not be reached', badState: 'bad' });
+    expect(space.violation!.steps.map((s) => [s.state, s.event])).toEqual([['0', 'a'], ['1', 'b']]);
+    expectConsistent(space);
+  });
+
+  it('nothing is explored beyond a state that fails', async () => {
+    const getEvents = vi.fn((state: string) => (state === 'bad' ? [{ event: 'further' }] : [{ event: 'go' }]));
+    const space = await exploreIteratively<string, string>({
+      initialState: '0',
+      getEvents,
+      applyEvent: (_, event) => ({ to: event === 'go' ? 'bad' : 'beyond' }),
+      invariant: (state) => (state === 'bad' ? { error: 'bad' } : undefined),
+    });
+    expect(getEvents.mock.calls.map(([state]) => state)).toEqual(['0']);
+    expect(space.costs.has('bad')).toBe(false);
+    expect(space.transitions.get('0')).toEqual([{ event: 'go', index: 0, cost: [], error: 'bad', badState: 'bad' }]);
+    expect(space.exhaustive).toBe(true);
+  });
+
+  it('is checked once per distinct state, however many edges lead there and however many runs', async () => {
+    const model = guarded('0', {
+      '0': [['a', [], '1'], ['b', [], '2']],
+      '1': [['c', [], '3']],
+      '2': [['c', [], '3']],
+    });
+    const cache = new StateSpaceCache(model);
+    await exploreIteratively(cache);
+    await explore(cache, { [DEVIATIONS_KEY]: 5 });
+    expect([...model.checked].sort()).toEqual(['0', '1', '2', '3']);
+  });
+
+  it('an initial state that fails is a violation with no steps, and nothing is explored', async () => {
+    const model = guarded('bad start', { 'bad start': [['a', [], '1']] });
+    const getEvents = vi.spyOn(model, 'getEvents');
+    const space = await exploreIteratively(model);
+    expect(space.violation).toMatchObject({ steps: [], error: 'bad start must not be reached', badState: 'bad start' });
+    expect(space.violation!.cost.size).toBe(0);
+    expect(space.maxDeviationsReached).toBe(0);
+    expect(getEvents).not.toHaveBeenCalled();
+    expectConsistent(space);
+  });
+
+  it('is ordered with applyEvent errors: the cheapest violation wins, whichever kind it is', async () => {
+    // A failing state one deviation away; an applyEvent error on the baseline, three steps in.
+    const cheapError = await exploreIteratively(
+      guarded('0', { '0': [['on', [], '1'], ['stray', [], 'bad']], '1': [['on', [], '2']], '2': [['crash', [], '!crash']] }),
+    );
+    expect(cheapError.violation).toMatchObject({ error: 'crash' });
+    expect('badState' in cheapError.violation!).toBe(false);
+    expectConsistent(cheapError);
+
+    // The other way round: the failing state is on the baseline.
+    const cheapState = await exploreIteratively(
+      guarded('0', { '0': [['on', [], '1'], ['stray', [], '!crash']], '1': [['on', [], 'bad']] }),
+    );
+    expect(cheapState.violation).toMatchObject({ error: 'bad must not be reached', badState: 'bad' });
+    expect(cheapState.maxDeviationsReached).toBe(0);
+    expectConsistent(cheapState);
+  });
+
+  it('may be async, and a throw is a failure', async () => {
+    const space = await exploreIteratively<number, string>({
+      initialState: 0,
+      getEvents: () => [{ event: 'inc' }],
+      applyEvent: (n) => ({ to: n + 1 }),
+      async invariant(n) {
+        await Promise.resolve();
+        if (n >= 3) throw new Error(`${n} is too many`);
+      },
+    });
+    expect((space.violation!.error as Error).message).toBe('3 is too many');
+    expect(space.violation!.badState).toBe(3);
+    expect(space.violation!.steps).toHaveLength(3);
+  });
+
+  it('badState is the canonical value, identical to the same state reached elsewhere', async () => {
+    const space = await exploreIteratively<{ n: number }, string>(
+      {
+        initialState: { n: 0 },
+        getEvents: (s) => (s.n === 0 ? [{ event: 'safe' }, { event: 'unsafe' }] : []),
+        applyEvent: (_, event) => ({ to: { n: event === 'safe' ? 1 : 2 } }),
+        invariant: (s) => (s.n === 2 ? { error: 'two' } : undefined),
+      },
+      { stopOnViolation: false },
+    );
+    const viaTransition = space.transitions.get(space.initialState)!.find((t) => 'error' in t)!;
+    expect(space.violation!.badState).toEqual({ n: 2 });
+    expect(space.violation!.badState).toBe('badState' in viaTransition ? viaTransition.badState : undefined);
   });
 });

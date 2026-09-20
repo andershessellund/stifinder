@@ -8,8 +8,8 @@ export default tseslint.config(
       parserOptions: { project: './tsconfig.tests.json', tsconfigRootDir: import.meta.dirname },
     },
     rules: {
-      // `ExplorerConfig` callbacks are declared async by contract; models
-      // that happen to be synchronous need no `await`.
+      // A `Model`'s callbacks may be async or not. The test fixtures are
+      // async on purpose, to cover that form, and have nothing to `await`.
       '@typescript-eslint/require-await': 'off',
     },
   },
