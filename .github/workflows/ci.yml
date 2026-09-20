@@ -5,18 +5,23 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
+        # 22 is the runtime floor (`engines`); `latest` is where the next
+        # breakage shows up first.
         node: [22, latest]
     name: test (node ${{ matrix.node }})
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
@@ -25,3 +30,24 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm lint
+
+  # What the suite cannot see, because it imports from src/: the package as it
+  # is PUBLISHED. A typo in the `exports` map or a `types` path that is not
+  # packed passes every test, and surfaces only in a release.
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: latest
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      # publint lints the packed tarball (exports, types, files, sideEffects);
+      # attw resolves the entry point the way consumers' TypeScript does.
+      # `esm-only` sets aside the CommonJS and node10 columns: there is no
+      # CommonJS build.
+      - run: pnpm check:package

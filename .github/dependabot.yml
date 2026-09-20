@@ -1,0 +1,34 @@
+version: 2
+updates:
+  # Actions are pinned to commit SHAs (a tag can be moved; a SHA cannot);
+  # Dependabot keeps the pins, and the version comments beside them, current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ['*']
+
+  # stifinder's one runtime dependency, valsem, is a peer; the rest is the
+  # toolchain. The peer RANGE in package.json is part of the public contract
+  # and is widened by hand; what moves here is the valsem the tests run on.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    ignore:
+      # The major of @types/node mirrors the Node major. It stays at the
+      # supported floor (`engines` in package.json), so the typecheck rejects
+      # a Node API the floor does not have. It moves only when the floor is
+      # raised on purpose, which is a breaking change (CONTRIBUTING.md).
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+    groups:
+      toolchain:
+        patterns: ['*']
+        update-types: [minor, patch]
