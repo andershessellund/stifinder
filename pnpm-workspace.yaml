@@ -1,4 +1,2 @@
 allowBuilds:
   esbuild: true
-minimumReleaseAgeExclude:
-  - valsem@0.0.3
