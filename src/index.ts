@@ -120,13 +120,28 @@ export interface Model<State, Event> {
    * fine. Throwing is treated as `{ error }`.
    *
    * Checked once per distinct state, the initial state included, before the
-   * state is explored. Reaching a state that fails is a violation whose
+   * state is explored (so before `getEvents` sees it). Reaching a state that fails is a violation whose
    * `badState` is that state; nothing is explored beyond it.
    *
    * Must be a pure function of `state`: results are memoized for the
    * lifetime of the cache.
    */
   invariant?(state: State): InvariantResult | Promise<InvariantResult>;
+  /**
+   * Optional: what must hold where nothing more can happen. Called for a
+   * state only when `getEvents(state)` is empty, and only after `invariant`
+   * has passed it; returns and throws as `invariant` does, and a failure is
+   * reported the same way, with the state as `badState`.
+   *
+   * This is where a model tells an acceptable end from a deadlock, and where
+   * end-of-run conditions go (every message delivered, replicas converged).
+   * "Terminal" is a property of the model, not of a budget: a state whose
+   * events are all unaffordable is not terminal.
+   *
+   * Must be a pure function of `state`: results are memoized for the
+   * lifetime of the cache.
+   */
+  terminalInvariant?(state: State): InvariantResult | Promise<InvariantResult>;
 }
 
 /** @deprecated The old name of {@link Model}. */
@@ -351,7 +366,7 @@ export class StateSpaceCache<State, Event> {
   // pruning happens at projection time.
   /** State → cost vector → arrival. Keys are interned, so lookup is `===`. */
   readonly reached = new HashMap<State, Map<CostVector, CostEntry<State, Event>>>();
-  /** `invariant` results per state checked: the failure, or `null` for a state that holds. */
+  /** Per state checked: the failure of `invariant` or `terminalInvariant`, or `null` for a state that holds. */
   readonly invariants = new HashMap<State, { error: unknown } | null>();
   /** Set when the initial state itself fails the invariant: a violation
    *  with no steps. Nothing is explored from it. */
@@ -441,16 +456,29 @@ export class StateSpaceCache<State, Event> {
     return result;
   }
 
-  /** The model's `invariant` for `state`, memoized: the failure, or `null` if the state holds. */
+  /**
+   * The model's checks for `state`, memoized: the failure, or `null` if the
+   * state holds. `invariant` goes first, and guards `getEvents`: only a state
+   * that passes it is asked for its events, and only one with none is shown
+   * to `terminalInvariant`. That `getEvents` call is the one exploring the
+   * state would make anyway, made earlier.
+   */
   async checkInvariant(state: State): Promise<{ error: unknown } | null> {
-    if (this.config.invariant === undefined) return null;
+    const config = this.config;
+    if (config.invariant === undefined && config.terminalInvariant === undefined) return null;
     const cached = this.invariants.get(state);
     if (cached !== undefined) return cached;
-    let failure: { error: unknown } | null;
-    try {
-      failure = (await this.config.invariant(state)) ?? null;
-    } catch (error) {
-      failure = { error };
+
+    const run = async (check: () => InvariantResult | Promise<InvariantResult>): Promise<{ error: unknown } | null> => {
+      try {
+        return (await check()) ?? null;
+      } catch (error) {
+        return { error };
+      }
+    };
+    let failure = await run(() => config.invariant?.(state));
+    if (failure === null && config.terminalInvariant !== undefined && (await this.getEvents(state)).length === 0) {
+      failure = await run(() => config.terminalInvariant?.(state));
     }
     this.invariants.set(state, failure);
     return failure;
