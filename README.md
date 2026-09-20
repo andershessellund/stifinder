@@ -51,7 +51,7 @@ npm install stifinder valsem
 ## The model
 
 You describe a system as a `Model<State, Event>`: an `initialState`, two
-callbacks, and optionally a third. Each may be synchronous or return a
+callbacks, and two optional checks. Each may be synchronous or return a
 promise.
 
 - **`getEvents(state)`** returns the events worth considering from a state,
@@ -64,12 +64,22 @@ promise.
   never be reached, and nothing for one that is fine. Throwing counts as an
   error here too. It is checked once per distinct state, the initial state
   included, and nothing is explored beyond a state that fails.
+- **`terminalInvariant(state)`**, optional, is the same check for the states
+  where nothing more can happen: those for which `getEvents` returned `[]`.
+  It runs after `invariant` has passed the state.
 
-An error can so come from either side. `applyEvent` is where the system under
+So an error can come from three places. `applyEvent` is where the system under
 test fails *while doing something*: it threw, and there is no next state.
 `invariant` is where a state is wrong *in itself*, whichever event led there:
-two leaders, a negative balance, nobody able to move. The violation then
-carries that state as `badState`.
+two leaders, a negative balance. `terminalInvariant` is where a run *ends*
+wrong: everybody waiting for somebody else, a message never delivered,
+replicas that did not converge. It is what tells an acceptable end from a
+deadlock. For the last two the violation carries the state, as `badState`.
+
+An end is a property of the model, not of a budget: a state whose events are
+all unaffordable is not terminal, and is not shown to `terminalInvariant`. A
+model that bounds its runs by returning `[]` after so many steps does make
+those states terminal, and its `terminalInvariant` has to expect them.
 
 Each event may also list explicit **cost keys**
 (`{ event, cost: ['crash', 'retry'] }`); leaving `cost` out means none. A key
@@ -167,9 +177,10 @@ deviation), and the cost accumulated from the initial state to reach `state`.
 A step's `cost` is the cost *before* it; the violation's own `cost` is the
 cost of the whole path, the failing event included: a budget finds this
 path exactly when it allows that much. `badState` is present when the error
-is a state failing the `invariant`: the state the last step led to, or the
-initial state, in which case `steps` is empty. Both kinds of error are
-ordered together, so the cheapest violation is reported whichever it is.
+is a state failing `invariant` or `terminalInvariant`: the state the last
+step led to, or the initial state, in which case `steps` is empty. All kinds
+of error are ordered together, so the cheapest violation is reported
+whichever it is.
 
 ### Options
 

@@ -749,3 +749,93 @@ describe('invariant', () => {
     expect(space.violation!.badState).toBe('badState' in viaTransition ? viaTransition.badState : undefined);
   });
 });
+
+describe('terminalInvariant', () => {
+  it('tells an acceptable end from a deadlock, and reports the state that is stuck', async () => {
+    // Two ways for a run to end: at `done`, and at `stuck`, one deviation away.
+    const space = await exploreIteratively<string, string>({
+      ...graph('0', { '0': [['work', [], 'done'], ['wait', [], 'stuck']] }),
+      terminalInvariant: (state) => (state === 'done' ? undefined : { error: `deadlock at ${state}` }),
+    });
+    expect(space.violation).toMatchObject({ error: 'deadlock at stuck', badState: 'stuck' });
+    expect(space.violation!.steps.map((s) => [s.event, s.index])).toEqual([['wait', 1]]);
+    expect(space.maxDeviationsReached).toBe(1); // budget 0 ended at `done`, which is fine
+    expectConsistent(space);
+  });
+
+  it('sees only states with no events, once each, and getEvents still runs once per state', async () => {
+    const seen: string[] = [];
+    const model = {
+      ...graph('0', { '0': [['a', [], '1'], ['b', [], '2']], '1': [['c', [], 'end']], '2': [['c', [], 'end']] }),
+      terminalInvariant(state: string) {
+        seen.push(state);
+      },
+    };
+    const getEvents = vi.spyOn(model, 'getEvents');
+    const cache = new StateSpaceCache(model);
+    const space = await exploreIteratively(cache);
+    await explore(cache, { [DEVIATIONS_KEY]: 5 });
+    expect(seen).toEqual(['end']);
+    expect(getEvents.mock.calls.map(([state]) => state).sort()).toEqual(['0', '1', '2', 'end']);
+    expect(space).toMatchObject({ violation: null, exhaustive: true });
+  });
+
+  it('a state whose events are all unaffordable is not terminal', async () => {
+    const terminalInvariant = vi.fn(() => ({ error: 'stuck' }));
+    const model = { ...graph('0', { '0': [['go', [], '1']], '1': [['pay', ['k'], '2']], '2': [['on', [], '3']] }), terminalInvariant };
+    // No `k` in the budget: the run cannot leave `1`, but `1` has an event, so it is not an end.
+    const broke = await exploreIteratively(new StateSpaceCache(model), { maxDeviations: 2 });
+    expect(broke).toMatchObject({ violation: null, exhaustive: false });
+    expect(terminalInvariant).not.toHaveBeenCalled();
+    // With it, the run reaches the real end.
+    const paid = await exploreIteratively(new StateSpaceCache(model), { baseBudget: { k: 1 } });
+    expect(paid.violation).toMatchObject({ error: 'stuck', badState: '3' });
+  });
+
+  it('comes after invariant, which still keeps getEvents away from a state it fails', async () => {
+    const calls: string[] = [];
+    const space = await exploreIteratively<string, string>({
+      initialState: '0',
+      getEvents(state) {
+        calls.push(`getEvents ${state}`);
+        return state === '0' ? [{ event: 'go' }] : [];
+      },
+      applyEvent: () => ({ to: 'bad end' }),
+      invariant(state) {
+        calls.push(`invariant ${state}`);
+        return state.startsWith('bad') ? { error: 'bad' } : undefined;
+      },
+      terminalInvariant(state) {
+        calls.push(`terminalInvariant ${state}`);
+        return { error: 'stuck' };
+      },
+    });
+    expect(calls).toEqual(['invariant 0', 'getEvents 0', 'invariant bad end']);
+    expect(space.violation).toMatchObject({ error: 'bad', badState: 'bad end' });
+  });
+
+  it('an initial state with nothing to do is checked too', async () => {
+    const space = await exploreIteratively<string, string>({
+      initialState: 'nothing to do',
+      getEvents: () => [],
+      applyEvent: () => ({ error: 'unreachable' }),
+      terminalInvariant: () => ({ error: 'nothing ever happened' }),
+    });
+    expect(space.violation).toMatchObject({ steps: [], error: 'nothing ever happened', badState: 'nothing to do' });
+    expectConsistent(space);
+  });
+
+  it('may be async, and a throw is a failure', async () => {
+    const space = await exploreIteratively<number, string>({
+      initialState: 0,
+      getEvents: (n) => (n < 2 ? [{ event: 'inc' }] : []),
+      applyEvent: (n) => ({ to: n + 1 }),
+      async terminalInvariant(n) {
+        await Promise.resolve();
+        throw new Error(`ended at ${n}`);
+      },
+    });
+    expect((space.violation!.error as Error).message).toBe('ended at 2');
+    expect(space.violation!.badState).toBe(2);
+  });
+});
