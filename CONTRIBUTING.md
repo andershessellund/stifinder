@@ -28,7 +28,8 @@ CI runs the first four on Node 22 and on the latest Node, and the last one
 once: it checks what the tests cannot see, since the tests import from `src/`
 (the `exports` map, how the published types resolve).
 
-Tests sit beside the source, in `src/`.
+Tests sit beside the source, in `src/`. The examples in `examples/` have tests
+too: the README quotes their output, and the tests are what keeps it true.
 
 ## Pull requests
 

@@ -51,3 +51,6 @@ jobs:
       # `esm-only` sets aside the CommonJS and node10 columns: there is no
       # CommonJS build.
       - run: pnpm check:package
+      # The examples import 'stifinder' by name. The test suite points that at
+      # src/; this runs one as a user would, through `exports` and the build.
+      - run: node examples/dining-philosophers.ts
