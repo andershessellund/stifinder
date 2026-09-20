@@ -68,7 +68,15 @@ export function toBudget(b: BudgetLike): BudgetVector {
 /** Reserved budget key counting non-preferred event choices along a path. */
 export const DEVIATIONS_KEY = '__deviations__';
 
-export type ApplyResult<State> = { to: State } | { error: unknown };
+/**
+ * What applying an event gives: the successor state, or an error. The cache
+ * adds `badState` when `applyEvent` returned a state and that state failed
+ * the model's `invariant`; an error from `applyEvent` itself has no state.
+ */
+export type ApplyResult<State> = { to: State } | { error: unknown; badState?: State };
+
+/** What `invariant` returns: nothing for a state that is fine, `{ error }` for one that is not. */
+export type InvariantResult = { error: unknown } | undefined | void;
 
 /** One event the caller wants the explorer to consider from a state. */
 export interface EventDescriptor<Event> {
@@ -83,8 +91,8 @@ export interface EventDescriptor<Event> {
 
 /**
  * A system described for exploration: where it starts, what can happen in
- * a state, and what each event does. Both callbacks may be synchronous or
- * return a promise.
+ * a state, what each event does, and optionally which states must never be
+ * reached. Every callback may be synchronous or return a promise.
  */
 export interface Model<State, Event> {
   initialState: State;
@@ -106,6 +114,19 @@ export interface Model<State, Event> {
    * the lifetime of the cache.
    */
   applyEvent(state: State, event: Event): ApplyResult<State> | Promise<ApplyResult<State>>;
+  /**
+   * Optional: what must hold in every reachable state. Return `{ error }`
+   * for a state that must never be reached, and nothing for one that is
+   * fine. Throwing is treated as `{ error }`.
+   *
+   * Checked once per distinct state, the initial state included, before the
+   * state is explored. Reaching a state that fails is a violation whose
+   * `badState` is that state; nothing is explored beyond it.
+   *
+   * Must be a pure function of `state`: results are memoized for the
+   * lifetime of the cache.
+   */
+  invariant?(state: State): InvariantResult | Promise<InvariantResult>;
 }
 
 /** @deprecated The old name of {@link Model}. */
@@ -114,7 +135,7 @@ export type ExplorerConfig<State, Event> = Model<State, Event>;
 /** One computed edge out of a state, as listed by `analyzeCache`. */
 export type BaseTransition<State, Event> =
   | { event: Event; index: number; cost: readonly string[]; to: State }
-  | { event: Event; index: number; cost: readonly string[]; error: unknown };
+  | { event: Event; index: number; cost: readonly string[]; error: unknown; badState?: State };
 
 /** One step of a violation trace: the event applied at `state`, which
  *  had been reached at accumulated cost `cost`. */
@@ -135,6 +156,10 @@ export interface ViolationPath<State, Event> {
    *  before step `k`; this is the cost after the last one. */
   cost: CostVector;
   error: unknown;
+  /** The state that failed the model's `invariant`: the one the last step
+   *  led to, or the initial state when `steps` is empty. Absent when the
+   *  error came from `applyEvent`, which then produced no state. */
+  badState?: State;
 }
 
 /** Result of a single `explore()` call — pure statistics. The state-space
@@ -280,6 +305,8 @@ export interface ErrorEdgeEntry<State, Event> {
   /** Number of steps in the violation path ending with this edge. */
   depth: number;
   error: unknown;
+  /** The state `event` led to, when the error is that state failing the invariant. */
+  badState?: State;
 }
 
 /** Pending traversal of a single (state, cost, event) edge. `cost` and
@@ -324,6 +351,11 @@ export class StateSpaceCache<State, Event> {
   // pruning happens at projection time.
   /** State → cost vector → arrival. Keys are interned, so lookup is `===`. */
   readonly reached = new HashMap<State, Map<CostVector, CostEntry<State, Event>>>();
+  /** `invariant` results per state checked: the failure, or `null` for a state that holds. */
+  readonly invariants = new HashMap<State, { error: unknown } | null>();
+  /** Set when the initial state itself fails the invariant: a violation
+   *  with no steps. Nothing is explored from it. */
+  initialError: { error: unknown } | null = null;
   /** Cumulative list of error edges discovered. Used by `analyzeCache`. */
   readonly errorEdges: ErrorEdgeEntry<State, Event>[] = [];
   /** Edges not yet traversed, bucketed by successor deviation count and
@@ -399,8 +431,29 @@ export class StateSpaceCache<State, Event> {
     } catch (error) {
       result = { error };
     }
+    // An edge into a state that fails the invariant is an error edge: it is
+    // stored, ordered and reported like any other, and carries the state.
+    if ('to' in result) {
+      const failure = await this.checkInvariant(result.to);
+      if (failure !== null) result = { error: failure.error, badState: intern(result.to) };
+    }
     bucket.set(event, result);
     return result;
+  }
+
+  /** The model's `invariant` for `state`, memoized: the failure, or `null` if the state holds. */
+  async checkInvariant(state: State): Promise<{ error: unknown } | null> {
+    if (this.config.invariant === undefined) return null;
+    const cached = this.invariants.get(state);
+    if (cached !== undefined) return cached;
+    let failure: { error: unknown } | null;
+    try {
+      failure = (await this.config.invariant(state)) ?? null;
+    } catch (error) {
+      failure = { error };
+    }
+    this.invariants.set(state, failure);
+    return failure;
   }
 
   /**
@@ -526,7 +579,9 @@ async function exploreLocked<State, Event>(
   // Lazy seed on first explore call against a fresh cache.
   if (cache.reached.size === 0) {
     cache.addCostEntry(cache.initialState, EMPTY_COST, 0, null);
-    await seedPending(cache.initialState, EMPTY_COST, 0);
+    cache.initialError = await cache.checkInvariant(cache.initialState);
+    // As with any state that fails the invariant, nothing is explored beyond it.
+    if (cache.initialError === null) await seedPending(cache.initialState, EMPTY_COST, 0);
   }
 
   // Re-inject every deferred edge that this call's budget can afford.
@@ -587,6 +642,7 @@ async function exploreLocked<State, Event>(
             totalCost: item.cost,
             depth: item.depth,
             error: result.error,
+            ...('badState' in result ? { badState: result.badState } : {}),
           });
           continue;
         }
@@ -634,7 +690,7 @@ export function analyzeCache<State, Event>(
   const budgetV = toBudget(budget);
   const costs = buildCosts(cache, budgetV);
   const transitions = buildTransitions(cache, costs);
-  const violation = cache.errorEdges.length > 0 ? findShortestViolation(cache, budgetV) : null;
+  const violation = findShortestViolation(cache, budgetV);
   return {
     initialState: cache.initialState,
     budget: budgetV,
@@ -767,7 +823,10 @@ function buildTransitions<State, Event>(
       const result = bucket?.get(ev.event);
       if (result === undefined) continue; // never computed (e.g. always unaffordable)
       if ('error' in result) {
-        list.push({ event: ev.event, index, cost: ev.cost, error: result.error });
+        list.push({
+          event: ev.event, index, cost: ev.cost, error: result.error,
+          ...('badState' in result ? { badState: result.badState } : {}),
+        });
       } else {
         list.push({ event: ev.event, index, cost: ev.cost, to: result.to });
       }
@@ -791,6 +850,11 @@ function findShortestViolation<State, Event>(
   cache: StateSpaceCache<State, Event>,
   budget: BudgetVector,
 ): ViolationPath<State, Event> | null {
+  // The initial state failing the invariant costs nothing and takes no steps.
+  if (cache.initialError !== null) {
+    return { steps: [], cost: EMPTY_COST, error: cache.initialError.error, badState: cache.initialState };
+  }
+
   let best: ErrorEdgeEntry<State, Event> | null = null;
   let bestDevs = Infinity;
   let bestSum = Infinity;
@@ -825,7 +889,7 @@ function findShortestViolation<State, Event>(
     curCost = pred.fromCost;
   }
 
-  return { steps, cost: best.totalCost, error: best.error };
+  return { steps, cost: best.totalCost, error: best.error, ...('badState' in best ? { badState: best.badState } : {}) };
 }
 
 /**
@@ -837,10 +901,14 @@ function findShortestViolation<State, Event>(
  * It uses the same ordering as `analysis.violation` (fewest deviations,
  * then least non-deviation cost, then fewest steps), so on an unedited
  * analysis the two agree. Prefer `analysis.violation`; it is much cheaper.
+ *
+ * A violation with no steps is the initial state failing the invariant. No
+ * transition leads to it and none can outrank it, so it is returned as is.
  */
 export function shortestViolation<State, Event>(
   analysis: CacheAnalysis<State, Event>,
 ): ViolationPath<State, Event> | null {
+  if (analysis.violation?.steps.length === 0) return analysis.violation;
   return shortestViolationFromTransitions(analysis.initialState, analysis.budget, analysis.transitions);
 }
 
@@ -861,7 +929,8 @@ function shortestViolationFromTransitions<State, Event>(
   // Plain BFS visits nodes in depth order; among violations found, keep
   // the lexicographically best (devs, sum, depth). Depth is the BFS layer,
   // so the first violation seen at a given (devs, sum) is the shortest.
-  type Best = { node: Node; event: Event; index: number; cost: CostVector; error: unknown; devs: number; sum: number };
+  type ErrorTransition = Extract<BaseTransition<State, Event>, { error: unknown }>;
+  type Best = { node: Node; via: ErrorTransition; cost: CostVector; devs: number; sum: number };
   let best: Best | null = null;
 
   for (let qi = 0; qi < queue.length; qi++) {
@@ -877,7 +946,7 @@ function shortestViolationFromTransitions<State, Event>(
         const devs = cost.get(DEVIATIONS_KEY) ?? 0;
         const sum = costSum(cost);
         if (best === null || devs < best.devs || (devs === best.devs && sum < best.sum)) {
-          best = { node: current, event: t.event, index: t.index, cost, error: t.error, devs, sum };
+          best = { node: current, via: t, cost, devs, sum };
         }
         continue;
       }
@@ -892,7 +961,7 @@ function shortestViolationFromTransitions<State, Event>(
 
   if (best === null) return null;
   const steps: ViolationStep<State, Event>[] = [
-    { state: best.node.state, cost: best.node.cost, event: best.event, index: best.index },
+    { state: best.node.state, cost: best.node.cost, event: best.via.event, index: best.via.index },
   ];
   let node: Node = best.node;
   for (;;) {
@@ -901,5 +970,6 @@ function shortestViolationFromTransitions<State, Event>(
     steps.unshift({ state: parent.from.state, cost: parent.from.cost, event: parent.event, index: parent.index });
     node = parent.from;
   }
-  return { steps, cost: best.cost, error: best.error };
+  const { error, badState } = best.via;
+  return { steps, cost: best.cost, error, ...(badState !== undefined ? { badState } : {}) };
 }
