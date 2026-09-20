@@ -64,9 +64,9 @@ export function diningPhilosophers(n: number, order: ForkOrder): Model<Table, St
         ? { to: { holder: table.holder.with(step.fork, step.phil), turn: step.phil } }
         : { to: { holder: table.holder.map((h) => (h === step.phil ? null : h)), turn: (step.phil + 1) % n } },
 
-    // Nobody ever leaves the table, so a table where nobody can move is not
-    // the end of a run: it is everybody waiting for somebody else.
-    invariant: (table) => (steps(table).length === 0 ? { error: new Error('deadlock') } : undefined),
+    // Nobody ever leaves the table, so there is no good way for a run to end:
+    // a table where nobody can move is everybody waiting for somebody else.
+    terminalInvariant: () => ({ error: new Error('deadlock') }),
   };
 }
 
@@ -75,7 +75,7 @@ export async function report(n: number, order: ForkOrder): Promise<string[]> {
   const { violation, exhaustive, costs, edgesComputed } = await exploreIteratively(diningPhilosophers(n, order));
 
   if (violation) {
-    // This model's only error is the invariant's, and that always carries the state.
+    // This model's only error is the terminalInvariant's, and that always carries the state.
     const held = violation.badState!.holder.map((phil, fork) => `P${phil} has fork ${fork}`);
     return [
       `${order}: deadlock, ${violation.cost.get(DEVIATIONS_KEY) ?? 0} deviations from the expected schedule.`,

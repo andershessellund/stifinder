@@ -154,8 +154,8 @@ return {
       ? { to: { holder: table.holder.with(step.fork, step.phil), turn: step.phil } }
       : { to: { holder: table.holder.map((h) => (h === step.phil ? null : h)), turn: (step.phil + 1) % n } },
 
-  // Nobody ever leaves the table, so nobody able to move is everybody waiting.
-  invariant: (table) => (steps(table).length === 0 ? { error: new Error('deadlock') } : undefined),
+  // Nobody ever leaves the table, so any end is everybody waiting for somebody else.
+  terminalInvariant: () => ({ error: new Error('deadlock') }),
 };
 ```
 
