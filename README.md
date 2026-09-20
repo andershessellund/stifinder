@@ -127,28 +127,27 @@ never repeats work.
 
 [`examples/dining-philosophers.ts`](examples/dining-philosophers.ts) models
 the classic table: five philosophers, a fork between each pair, and a
-philosopher needs both of theirs to eat. The expected schedule is a polite
-one. Whoever's turn it is finishes their meal undisturbed, then the turn
-passes to their neighbour; a philosopher cutting in while another is mid-meal
-is a deviation.
+philosopher needs both of theirs to eat. The state is who holds each fork,
+and whose turn it is. The expected schedule is a polite one: whoever's turn
+it is finishes their meal undisturbed, then the turn passes to their
+neighbour. A philosopher cutting in while another is mid-meal is a deviation.
 
 ```ts
-async getEvents(table) {
-  // Every step that can be taken, starting with the philosopher whose turn it is.
-  return steps(table).map((event) => ({ event, cost: [] }));
-},
-async applyEvent(table, { phil }) {
-  const progress = table.progress.map((p, i) => (i === phil ? (p + 1) % 3 : p));
-  const finishedMeal = progress[phil] === 0;
-  const next = { progress, turn: finishedMeal ? (phil + 1) % n : phil };
-  // Nobody ever leaves the table, so nothing left to do is everybody waiting.
-  if (steps(next).length === 0) return { error: new Error('deadlock') };
-  return { to: next };
-},
-```
+return {
+  initialState: { holder: Array(n).fill(null), turn: 0 },
 
-`stifinder` has no notion of deadlock, and needs none: `applyEvent` computes
-every successor state, so it is where the model rejects one.
+  // Every step that can be taken, starting with the philosopher whose turn it is.
+  getEvents: (table) => steps(table).map((event) => ({ event })),
+
+  applyEvent: (table, step) =>
+    step.does === 'take'
+      ? { to: { holder: table.holder.with(step.fork, step.phil), turn: step.phil } }
+      : { to: { holder: table.holder.map((h) => (h === step.phil ? null : h)), turn: (step.phil + 1) % n } },
+
+  // Nobody ever leaves the table, so nobody able to move is everybody waiting.
+  invariant: (table) => (steps(table).length === 0 ? { error: new Error('deadlock') } : undefined),
+};
+```
 
 ```
 $ pnpm build && node examples/dining-philosophers.ts
@@ -158,16 +157,19 @@ left-first: deadlock, 4 deviations from the expected schedule.
   P2 takes fork 2  (cuts in)
   P3 takes fork 3  (cuts in)
   P4 takes fork 4  (cuts in)
+  and there they sit: P0 has fork 0, P1 has fork 1, P2 has fork 2, P3 has fork 3, P4 has fork 4.
 lowest-first: no deadlock. 214 states, every schedule explored.
 ```
 
 When everyone reaches for their left fork first, the table can deadlock, and
-the report says how: the shortest way there, and how unlucky the scheduling
-has to be. Budgets 0 to 3 were exhausted first, so no schedule with fewer than
-four interruptions deadlocks. When everyone reaches for the lower-numbered of
-their two forks first, exploration runs until no edge is left at any budget,
-and finds nothing. That is a proof, of exactly what was modelled: five
-philosophers. It says nothing about six.
+the report says how: the shortest way there (`violation.steps`, with each
+step's `index` telling a cut-in from a turn), how unlucky the scheduling has
+to be (`violation.cost`), and the table they end up at (`violation.badState`).
+Budgets 0 to 3 were exhausted first, so no schedule with fewer than four
+interruptions deadlocks. When everyone reaches for the lower-numbered of their
+two forks first, the result is `exhaustive` and has no violation. That is a
+proof, of exactly what was modelled: five philosophers. It says nothing about
+six.
 
 ## API
 
