@@ -54,11 +54,11 @@
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
     "@conventional-commits/parser": "0.4.1",
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.6.2",
     "eslint": "^10.11.0",
     "publint": "^0.3.24",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.70.0",
+    "typescript-eslint": "^8.70.1",
     "valsem": "^0.0.4",
     "vitest": "^5.0.1"
   }
