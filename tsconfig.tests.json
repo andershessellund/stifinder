@@ -1,6 +1,12 @@
 {
   "extends": "./tsconfig.json",
-  "compilerOptions": { "noEmit": true },
-  "include": ["src/**/*"],
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    // examples/ import 'stifinder' by name, as a user would; check them
+    // against the source, so that typecheck and lint need no build first.
+    "paths": { "stifinder": ["./src/index.ts"] }
+  },
+  "include": ["src/**/*", "examples/**/*", "vitest.config.ts"],
   "exclude": []
 }
