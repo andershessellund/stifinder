@@ -197,7 +197,11 @@ six.
    with its predecessor, and the edges not yet traversed. It is
    budget-independent and reusable across many searches in any order of
    budgets; the expensive calls are never repeated. One cache supports one
-   `explore` at a time; a concurrent call is rejected.
+   `explore` at a time; a concurrent call is rejected. What it stores is
+   internal: a cache offers its `model`, the canonical `initialState`,
+   `exhaustive` (the whole reachable state space is in it), `statesExplored`,
+   and the read-only counters `edgesComputed`, `exploreCalls`,
+   `getEventsCacheHits` and `applyEventCacheHits`.
 2. **`explore(cache, budget, options?)`** runs one budget-bounded BFS,
    filling the cache as a side effect. Returns an `ExploreResult` with
    `completed`, `exhaustive`, `timedOut`, and edge counts.

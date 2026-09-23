@@ -105,7 +105,8 @@ Not part of the API, and free to change in any release:
   violation depends on, and so the number of edges a search computes;
 - **the text of error messages** (that an operation throws, and the error's
   type, are API; its wording is not);
-- anything prefixed with `_` or marked `@internal`, and the layout of `dist/`;
+- anything prefixed with `_` or marked `@internal` (the published types
+  leave the latter out), and the layout of `dist/`;
 - performance characteristics.
 
 A type-only change that can break a build that compiled before is treated as

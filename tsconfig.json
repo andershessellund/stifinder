@@ -9,6 +9,9 @@
     "rootDir": "./src",
     "declaration": true,
     "declarationMap": true,
+    // What is marked @internal is not API (CONTRIBUTING.md), and is left out
+    // of the published types.
+    "stripInternal": true,
     "sourceMap": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,

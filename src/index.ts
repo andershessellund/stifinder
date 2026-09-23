@@ -68,12 +68,16 @@ export function toBudget(b: BudgetLike): BudgetVector {
 /** Reserved budget key counting non-preferred event choices along a path. */
 export const DEVIATIONS_KEY = '__deviations__';
 
+/** What a model's `applyEvent` returns: the successor state, or an error. */
+export type ApplyResult<State> = { to: State } | { error: unknown };
+
 /**
- * What applying an event gives: the successor state, or an error. The cache
- * adds `badState` when `applyEvent` returned a state and that state failed
- * the model's `invariant`; an error from `applyEvent` itself has no state.
+ * @internal What the cache records for an edge: an `ApplyResult`, with
+ * `badState` added when `applyEvent` returned a state that then failed the
+ * model's `invariant` or `terminalInvariant`. An error from `applyEvent`
+ * itself has no state.
  */
-export type ApplyResult<State> = { to: State } | { error: unknown; badState?: State };
+export type EdgeResult<State> = { to: State } | { error: unknown; badState?: State };
 
 /** What `invariant` returns: nothing for a state that is fine, `{ error }` for one that is not. */
 export type InvariantResult = { error: unknown } | undefined | void;
@@ -307,7 +311,7 @@ function costMax(a: CostVector, b: CostVector): CostVector {
 // StateSpaceCache
 // ---------------------------------------------------------------------------
 
-/** Predecessor of a (state, cost) arrival, for path reconstruction. */
+/** @internal Predecessor of a (state, cost) arrival, for path reconstruction. */
 export interface PredecessorEntry<State, Event> {
   from: State;
   fromCost: CostVector;
@@ -316,7 +320,7 @@ export interface PredecessorEntry<State, Event> {
   index: number;
 }
 
-/** One arrival at a (state, cost) pair. */
+/** @internal One arrival at a (state, cost) pair. */
 export interface CostEntry<State, Event> {
   /** Number of steps from the initial state (minimum for this exact cost). */
   depth: number;
@@ -324,7 +328,7 @@ export interface CostEntry<State, Event> {
   pred: PredecessorEntry<State, Event> | null;
 }
 
-/** Error edge discovered during exploration. */
+/** @internal Error edge discovered during exploration. */
 export interface ErrorEdgeEntry<State, Event> {
   from: State;
   /** Cost-to-reach `from` at the moment this edge was applied. */
@@ -342,8 +346,8 @@ export interface ErrorEdgeEntry<State, Event> {
   badState?: State;
 }
 
-/** Pending traversal of a single (state, cost, event) edge. `cost` and
- *  `depth` are the **successor's**: `addCost(fromCost, ev.cost, index !== 0)`
+/** @internal Pending traversal of a single (state, cost, event) edge. `cost`
+ *  and `depth` are the **successor's**: `addCost(fromCost, ev.cost, index !== 0)`
  *  and the from-entry's depth + 1. */
 export interface PendingEdge<State, Event> {
   from: State;
@@ -363,16 +367,19 @@ export interface PendingEdge<State, Event> {
  * budgets — a richer budget can only enable additional transitions, never
  * invalidate existing ones. Concurrent `explore()` calls on one cache
  * are rejected.
+ *
+ * What it stores is internal. Its API is the model, the canonical initial
+ * state, `exhaustive`, `statesExplored`, and the counters.
  */
 export class StateSpaceCache<State, Event> {
-  readonly config: Model<State, Event>;
-  /** Canonical (interned) form of `config.initialState`. */
+  /** The model this cache explores. */
+  readonly model: Model<State, Event>;
+  /** Canonical (interned) form of `model.initialState`. */
   readonly initialState: State;
-  /** `getEvents` results, with an omitted `cost` filled in as `[]`. */
+  /** @internal `getEvents` results, with an omitted `cost` filled in as `[]`. */
   readonly events = new HashMap<State, Required<EventDescriptor<Event>>[]>();
-  readonly apply = new HashMap<State, HashMap<Event, ApplyResult<State>>>();
-  /** Cumulative `applyEvent` invocations (cache misses) across all calls. */
-  edgesComputed = 0;
+  /** @internal `applyEvent` results, as the cache records them. */
+  readonly apply = new HashMap<State, HashMap<Event, EdgeResult<State>>>();
 
   // ---- Cost model -------------------------------------------------------
   // For each state, every cost vector at which it has been reached that
@@ -382,42 +389,60 @@ export class StateSpaceCache<State, Event> {
   // `explore()` calls and are never invalidated. Entries dominated by a
   // later, cheaper arrival are kept so predecessors stay stable; Pareto
   // pruning happens at projection time.
-  /** State → cost vector → arrival. Keys are interned, so lookup is `===`. */
+  /** @internal State → cost vector → arrival. Keys are interned, so lookup is `===`. */
   readonly reached = new HashMap<State, Map<CostVector, CostEntry<State, Event>>>();
-  /** Per state checked: the failure of `invariant` or `terminalInvariant`, or `null` for a state that holds. */
+  /** @internal Per state checked: the failure of `invariant` or `terminalInvariant`, or `null` for a state that holds. */
   readonly invariants = new HashMap<State, { error: unknown } | null>();
-  /** Set when the initial state itself fails the invariant: a violation
-   *  with no steps. Nothing is explored from it. */
+  /** @internal Set when the initial state itself fails the invariant: a
+   *  violation with no steps. Nothing is explored from it. */
   initialError: { error: unknown } | null = null;
-  /** Cumulative list of error edges discovered. Used by `analyzeCache`. */
+  /** @internal Cumulative list of error edges discovered. Used by `analyzeCache`. */
   readonly errorEdges: ErrorEdgeEntry<State, Event>[] = [];
   /** @internal The componentwise maximum of every cost recorded, in
    *  `reached` and in `errorEdges`: a budget at least this large sees the
    *  whole cache. */
   costCeiling: CostVector = EMPTY_COST;
-  /** Edges not yet traversed, bucketed by successor deviation count and
-   *  then by successor depth. Empty (together with `deferred`) means the
-   *  entire reachable state space, under any future budget, has been
-   *  explored. */
+  /** @internal Edges not yet traversed, bucketed by successor deviation
+   *  count and then by successor depth. Empty (together with `deferred`)
+   *  means the entire reachable state space, under any future budget, has
+   *  been explored. */
   readonly pending: Map<number, Map<number, PendingEdge<State, Event>[]>> = new Map();
-  /** Pending edges found unaffordable in a non-deviation dimension during
-   *  some previous call. Re-checked against the budget of every call. */
+  /** @internal Pending edges found unaffordable in a non-deviation dimension
+   *  during some previous call. Re-checked against the budget of every call. */
   deferred: PendingEdge<State, Event>[] = [];
 
-  // ---- Diagnostic counters ---------------------------------------------
-  /** Number of `explore()` invocations against this cache. */
-  exploreCalls = 0;
-  /** Cumulative `getEvents` cache hits. */
-  getEventsCacheHits = 0;
-  /** Cumulative `applyEvent` cache hits. */
-  applyEventCacheHits = 0;
+  /** @internal The counts behind the read-only counters. */
+  readonly counts = { edgesComputed: 0, exploreCalls: 0, getEventsCacheHits: 0, applyEventCacheHits: 0 };
 
   /** @internal Set while an `explore()` call is in flight. */
   exploring = false;
 
-  constructor(config: Model<State, Event>) {
-    this.config = config;
-    this.initialState = intern(config.initialState);
+  constructor(model: Model<State, Event>) {
+    this.model = model;
+    this.initialState = intern(model.initialState);
+  }
+
+  /** @deprecated The old name of `model`. */
+  get config(): Model<State, Event> {
+    return this.model;
+  }
+
+  // ---- Diagnostic counters ---------------------------------------------
+  /** Cumulative `applyEvent` invocations (cache misses) across all calls. */
+  get edgesComputed(): number {
+    return this.counts.edgesComputed;
+  }
+  /** Number of `explore()` invocations against this cache. */
+  get exploreCalls(): number {
+    return this.counts.exploreCalls;
+  }
+  /** Cumulative `getEvents` cache hits. */
+  get getEventsCacheHits(): number {
+    return this.counts.getEventsCacheHits;
+  }
+  /** Cumulative `applyEvent` cache hits. */
+  get applyEventCacheHits(): number {
+    return this.counts.applyEventCacheHits;
   }
 
   /** True iff exploration has started and no edge is left to traverse at
@@ -431,10 +456,11 @@ export class StateSpaceCache<State, Event> {
     return this.events.size;
   }
 
+  /** @internal The model's `getEvents(state)`, memoized. */
   async getEvents(state: State): Promise<Required<EventDescriptor<Event>>[]> {
     const cached = this.events.get(state);
-    if (cached !== undefined) { this.getEventsCacheHits++; return cached; }
-    const fresh = (await this.config.getEvents(state)).map((ev) => ({ event: ev.event, cost: ev.cost ?? NO_COST_KEYS }));
+    if (cached !== undefined) { this.counts.getEventsCacheHits++; return cached; }
+    const fresh = (await this.model.getEvents(state)).map((ev) => ({ event: ev.event, cost: ev.cost ?? NO_COST_KEYS }));
     for (const ev of fresh) {
       if (ev.cost.includes(DEVIATIONS_KEY)) {
         throw new Error(`stifinder: event cost must not include the reserved key ${DEVIATIONS_KEY}`);
@@ -444,50 +470,56 @@ export class StateSpaceCache<State, Event> {
     return fresh;
   }
 
-  /** True iff `applyEvent(state, event)` has already been computed. */
+  /** @internal True iff `applyEvent(state, event)` has already been computed. */
   hasApplied(state: State, event: Event): boolean {
     return this.apply.get(state)?.has(event) ?? false;
   }
 
-  async applyEvent(state: State, event: Event): Promise<ApplyResult<State>> {
+  /** @internal The model's `applyEvent(state, event)`, memoized, with the
+   *  successor's checks applied. */
+  async applyEvent(state: State, event: Event): Promise<EdgeResult<State>> {
     let bucket = this.apply.get(state);
     if (bucket === undefined) {
-      bucket = new HashMap<Event, ApplyResult<State>>();
+      bucket = new HashMap<Event, EdgeResult<State>>();
       this.apply.set(state, bucket);
     } else {
       const cached = bucket.get(event);
       if (cached !== undefined) {
-        this.applyEventCacheHits++;
+        this.counts.applyEventCacheHits++;
         return cached;
       }
     }
-    this.edgesComputed++;
-    let result: ApplyResult<State>;
+    this.counts.edgesComputed++;
+    let result: EdgeResult<State>;
     try {
-      result = await this.config.applyEvent(state, event);
+      result = await this.model.applyEvent(state, event);
     } catch (error) {
       result = { error };
     }
-    // An edge into a state that fails the invariant is an error edge: it is
-    // stored, ordered and reported like any other, and carries the state.
     if ('to' in result) {
+      // An edge into a state that fails the invariant is an error edge: it
+      // is stored, ordered and reported like any other, and carries the state.
       const failure = await this.checkInvariant(result.to);
       if (failure !== null) result = { error: failure.error, badState: intern(result.to) };
+    } else {
+      // `badState` reports a state that failed a check, so it is the cache's
+      // to add. An error from `applyEvent` is kept as the error alone.
+      result = { error: result.error };
     }
     bucket.set(event, result);
     return result;
   }
 
   /**
-   * The model's checks for `state`, memoized: the failure, or `null` if the
-   * state holds. `invariant` goes first, and guards `getEvents`: only a state
-   * that passes it is asked for its events, and only one with none is shown
-   * to `terminalInvariant`. That `getEvents` call is the one exploring the
-   * state would make anyway, made earlier.
+   * @internal The model's checks for `state`, memoized: the failure, or
+   * `null` if the state holds. `invariant` goes first, and guards
+   * `getEvents`: only a state that passes it is asked for its events, and
+   * only one with none is shown to `terminalInvariant`. That `getEvents`
+   * call is the one exploring the state would make anyway, made earlier.
    */
   async checkInvariant(state: State): Promise<{ error: unknown } | null> {
-    const config = this.config;
-    if (config.invariant === undefined && config.terminalInvariant === undefined) return null;
+    const model = this.model;
+    if (model.invariant === undefined && model.terminalInvariant === undefined) return null;
     const cached = this.invariants.get(state);
     if (cached !== undefined) return cached;
 
@@ -498,17 +530,17 @@ export class StateSpaceCache<State, Event> {
         return { error };
       }
     };
-    let failure = await run(() => config.invariant?.(state));
-    if (failure === null && config.terminalInvariant !== undefined && (await this.getEvents(state)).length === 0) {
-      failure = await run(() => config.terminalInvariant?.(state));
+    let failure = await run(() => model.invariant?.(state));
+    if (failure === null && model.terminalInvariant !== undefined && (await this.getEvents(state)).length === 0) {
+      failure = await run(() => model.terminalInvariant?.(state));
     }
     this.invariants.set(state, failure);
     return failure;
   }
 
   /**
-   * Record an arrival at `state` with cost `newCost`. Returns the new
-   * entry if the cost is not dominated by (or equal to) an existing one,
+   * @internal Record an arrival at `state` with cost `newCost`. Returns the
+   * new entry if the cost is not dominated by (or equal to) an existing one,
    * else `null`.
    *
    * Dominated existing entries are NOT removed — predecessors remain
@@ -607,7 +639,7 @@ async function exploreLocked<State, Event>(
   budget: BudgetVector,
   limits: Limits,
 ): Promise<ExploreResult> {
-  cache.exploreCalls++;
+  cache.counts.exploreCalls++;
   const edgesAtStart = cache.edgesComputed;
   const edgeLimit = edgesAtStart + limits.maxEdges;
   const deadline = limits.deadline;
@@ -865,12 +897,12 @@ export async function exploreIteratively<State, Event>(
 // ---------------------------------------------------------------------------
 
 export async function exploreOnce<State, Event>(
-  config: Model<State, Event>,
+  model: Model<State, Event>,
   budget: BudgetLike,
   options?: ExploreOptions,
 ): Promise<ExploreResult & CacheAnalysis<State, Event>> {
   const budgetV = toBudget(budget);
-  const cache = new StateSpaceCache(config);
+  const cache = new StateSpaceCache(model);
   const result = await explore(cache, budgetV, options);
   const analysis = analyzeCache(cache, budgetV);
   return { ...result, ...analysis };
