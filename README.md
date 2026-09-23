@@ -110,7 +110,8 @@ ran out of things to explore. `exhaustive` says which:
 
 | `violation` | `exhaustive` | `completed` | What you know |
 | --- | --- | --- | --- |
-| set | | | This is the cheapest violation there is (see below). |
+| set | | `true` | The cheapest violation within the budget (see below). |
+| set | | `false` | One with the fewest deviations within the budget. One with less other cost may lie where the run did not reach; resuming on a kept cache finishes the search. |
 | `null` | `true` | `true` | **There is no violation.** Every reachable state was explored, whatever budget it takes, and all of them are within this result's budget. |
 | `null` | `false` | `true` | None within `maxDeviationsReached` deviations and the `baseBudget`. More budget may find one. |
 | `null` | `false` | `false` | The run hit `maxEdges` or `timeoutMs`. Budgets up to `maxDeviationsReached` are clear. |
@@ -135,13 +136,19 @@ the first arrival at a (state, cost) pair is the shallowest one, and the
 trace reconstructed from stored predecessors has the minimum number of
 steps for its cost.
 
-Deviation budgets are *delay bounding* (Emmi, Qadeer & Rakamarić,
+Violations can tie on all three. Which of them is reported is not
+specified: it follows the order of exploration, which may change between
+releases. Any of them is as short as the others.
+
+Deviation budgets follow *delay bounding* (Emmi, Qadeer & Rakamarić,
 "Delay-bounded scheduling", POPL 2011), which generalizes the preemption
 bounding of CHESS: a deterministic scheduler with a bounded number of
-departures from its default choice. `stifinder` keeps that idea and adds a
-vector of user-defined cost dimensions, tracked as a Pareto frontier per
-state, plus a cache that survives changes of budget so iterative deepening
-never repeats work.
+departures from its default choice. One difference: a delay skips one
+task, so taking the scheduler's k-th alternative costs k delays, while here
+any departure costs one deviation, whichever alternative it takes.
+`stifinder` adds a vector of user-defined cost dimensions, tracked as a
+Pareto frontier per state, plus a cache that survives changes of budget so
+iterative deepening never repeats work.
 
 ## An example: dining philosophers
 
@@ -230,8 +237,9 @@ six.
   state can be absent from `costs` when the edge was computed from an
   arrival the budget does not cover.
 - **`shortestViolation(analysis)`** recomputes the shortest violation path
-  from the transition table alone. On an unedited analysis it agrees with
-  `analysis.violation`, which is much cheaper.
+  from the transition table alone. On an unedited analysis it finds one of
+  the same rank as `analysis.violation`, which is much cheaper: the same
+  cost and number of steps, though of several that tie it may pick another.
 
 A violation is `{ steps, cost, error, badState? }`, where each step is
 `{ state, cost, event, index }`: the event applied at `state`, its position

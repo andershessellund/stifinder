@@ -1,8 +1,10 @@
-import { isCanonical } from 'valsem';
+import { ValueMap, isCanonical } from 'valsem';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   type ApplyResult,
   type CacheAnalysis,
+  type CostVector,
+  type ViolationPath,
   type EventDescriptor,
   type ExplorerConfig,
   type Model,
@@ -73,7 +75,9 @@ function graph(initial: string, edges: Record<string, Edge[]>): ExplorerConfig<s
   };
 }
 
-/** The embedded violation and the transition-table recomputation must agree. */
+/** The embedded violation and the transition-table recomputation have the
+ *  same rank, and each is a real path through the transitions. (Of several
+ *  violations that tie, they may pick different ones.) */
 function expectConsistent<State, Event>(analysis: CacheAnalysis<State, Event>): void {
   const recomputed = shortestViolation(analysis);
   if (analysis.violation === null) {
@@ -81,13 +85,32 @@ function expectConsistent<State, Event>(analysis: CacheAnalysis<State, Event>): 
     return;
   }
   expect(recomputed).not.toBeNull();
-  expect(recomputed!.error).toEqual(analysis.violation.error);
   expect(recomputed!.cost).toBe(analysis.violation.cost); // interned: equal vectors are identical
-  expect(recomputed!.badState).toEqual(analysis.violation.badState);
-  expect('badState' in recomputed!).toBe('badState' in analysis.violation);
-  expect(recomputed!.steps.map((s) => [s.state, s.cost, s.event, s.index])).toEqual(
-    analysis.violation.steps.map((s) => [s.state, s.cost, s.event, s.index]),
-  );
+  expect(recomputed!.steps).toHaveLength(analysis.violation.steps.length);
+  expectPath(analysis, analysis.violation);
+  expectPath(analysis, recomputed!);
+}
+
+/** `violation` follows `analysis.transitions` from the initial state, each
+ *  step at the cost it says, to the error it reports. */
+function expectPath<State, Event>(analysis: CacheAnalysis<State, Event>, violation: ViolationPath<State, Event>): void {
+  let state = analysis.initialState;
+  let cost: CostVector = ValueMap.empty();
+  for (const [i, step] of violation.steps.entries()) {
+    expect([step.state, step.cost], `step ${i}`).toEqual([state, cost]);
+    const t = analysis.transitions.get(step.state)!.find((t) => t.index === step.index)!;
+    expect(t.event, `step ${i}`).toEqual(step.event);
+    for (const key of t.cost) cost = cost.set(key, (cost.get(key) ?? 0) + 1);
+    if (t.index !== 0) cost = cost.set(DEVIATIONS_KEY, (cost.get(DEVIATIONS_KEY) ?? 0) + 1);
+    if (i < violation.steps.length - 1) {
+      expect('to' in t, `step ${i} leads on`).toBe(true);
+      if ('to' in t) state = t.to;
+    } else {
+      expect('error' in t && [t.error, t.badState]).toEqual([violation.error, violation.badState]);
+    }
+  }
+  if (violation.steps.length === 0) expect(violation.badState).toBe(analysis.initialState);
+  expect(violation.cost).toBe(cost);
 }
 
 afterEach(() => {
@@ -563,6 +586,22 @@ describe('regressions', () => {
     const atOne = analyzeCache(cache, { [DEVIATIONS_KEY]: 1 });
     expect(atOne.violation).not.toBeNull();
     expectConsistent(atOne);
+  });
+
+  it('of violations that tie, either may be reported, and the two searches may differ', async () => {
+    // Index sequences [2,0,1] and [1,1,0]: two deviations and three steps each.
+    const space = await exploreIteratively(
+      graph('root', {
+        root: [['e0', [], 'X0'], ['e1', [], 'X1'], ['e2', [], 'X2']],
+        X1: [['h0', [], 'sink'], ['h1', [], 'Q']],
+        Q: [['i0', [], '!EQ']],
+        X2: [['f0', [], 'P']],
+        P: [['g0', [], 'sink'], ['g1', [], '!EP']],
+      }),
+    );
+    expect(['EP', 'EQ']).toContain(space.violation!.error);
+    expect(['EP', 'EQ']).toContain(shortestViolation(space)!.error);
+    expectConsistent(space);
   });
 
   it('shortestViolation(analysis) ends on any budget, an unbounded one included', async () => {

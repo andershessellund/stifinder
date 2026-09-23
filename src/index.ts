@@ -30,9 +30,11 @@
 // `getEvents(state)` returns events in *preference order*. The event at
 // index 0 is the deviation-zero baseline; every other event charges one
 // unit of the implicit `__deviations__` budget — regardless of whether
-// the index-0 event is affordable under the current budget. This is
-// delay-bounded scheduling (Emmi, Qadeer & Rakamarić, POPL 2011) with the
-// delay budget generalized to a vector of user-defined cost dimensions.
+// the index-0 event is affordable under the current budget. This follows
+// delay-bounded scheduling (Emmi, Qadeer & Rakamarić, POPL 2011), except
+// that a departure costs one deviation whichever index it takes (a delay
+// skips one task, so the k-th alternative costs k delays there), and that
+// the budget is generalized to a vector of user-defined cost dimensions.
 //
 // Ordering of violations
 // ----------------------
@@ -1084,7 +1086,9 @@ function findShortestViolation<State, Event>(
  * Runs a BFS over (state, cost) nodes and is independent of the cache.
  * It uses the same ordering as `analysis.violation` (fewest deviations,
  * then least non-deviation cost, then fewest steps), so on an unedited
- * analysis the two agree. Prefer `analysis.violation`; it is much cheaper.
+ * analysis the two have the same rank; of several violations that tie,
+ * they may pick different ones. Prefer `analysis.violation`; it is much
+ * cheaper.
  *
  * A violation with no steps is the initial state failing the invariant. No
  * transition leads to it and none can outrank it, so it is returned as is.
