@@ -31,6 +31,10 @@ once: it checks what the tests cannot see, since the tests import from `src/`
 Tests sit beside the source, in `src/`. The examples in `examples/` have tests
 too: the README quotes their output, and the tests are what keeps it true.
 
+`src/oracle.test.ts` checks the search against a brute-force oracle on random
+models. It runs a few hundred of them; after a change to the search, run it
+on many more: `FUZZ_RUNS=20000 pnpm test oracle`.
+
 ## Pull requests
 
 Every change reaches `main` through a pull request; direct pushes are blocked

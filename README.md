@@ -108,13 +108,20 @@ ran out of things to explore. `exhaustive` says which:
 | `violation` | `exhaustive` | `completed` | What you know |
 | --- | --- | --- | --- |
 | set | | | This is the cheapest violation there is (see below). |
-| `null` | `true` | `true` | **There is no violation.** Every reachable state was explored, at every budget. |
+| `null` | `true` | `true` | **There is no violation.** Every reachable state was explored, whatever budget it takes, and all of them are within this result's budget. |
 | `null` | `false` | `true` | None within `maxDeviationsReached` deviations and the `baseBudget`. More budget may find one. |
 | `null` | `false` | `false` | The run hit `maxEdges` or `timeoutMs`. Budgets up to `maxDeviationsReached` are clear. |
 
 `completed: true` with `violation: null` reads like a proof and is not one: it
 is also what a run capped at `maxDeviations: 3` reports about a failure that
 needs four.
+
+A completed run stops short of `maxDeviations` only at a violation, or where
+no larger deviation budget could find anything more. Stopped there without a
+violation and not `exhaustive`, it has left something that only a larger
+`baseBudget` can reach. On a kept cache, explored earlier at a larger budget,
+a result is `exhaustive` only once its own budget covers everything the cache
+holds.
 
 ## Which violation is reported
 
@@ -200,10 +207,11 @@ six.
 - **`exploreIteratively(cacheOrModel, options?)`** calls `explore` with
   deviation budgets 0, 1, 2, … up to `maxDeviations`, stopping at the first
   budget that exhibits a violation (unless `stopOnViolation: false`) or once
-  nothing is left to explore. Returns a `StateSpace`: the `ExploreResult`,
-  the projection at the last budget attempted (`costs`, `transitions`,
-  `violation`), and `maxDeviationsReached`, the highest budget that
-  completed. Given a model, it uses a cache of its own; pass a
+  no larger deviation budget could find anything more. Returns a
+  `StateSpace`: the `ExploreResult`, the projection at the last budget
+  attempted (`costs`, `transitions`, `violation`), and
+  `maxDeviationsReached`, the highest budget that completed. Given a
+  model, it uses a cache of its own; pass a
   `StateSpaceCache` to keep it, to resume a run that hit a limit or to
   analyze other budgets afterwards.
 - **`exploreOnce(model, budget, options?)`** builds a fresh cache, explores,
@@ -237,11 +245,13 @@ whichever it is.
 | `maxEdges` | all | `100_000` | cap on `applyEvent` calls per `explore` call, or per `exploreIteratively` run; cache hits are free |
 | `timeoutMs` | all | none | wall-clock cap per `explore` call, or per `exploreIteratively` run |
 | `baseBudget` | iterative | `{}` | non-deviation allowances |
-| `maxDeviations` | iterative | `100` | deepest deviation budget tried |
+| `maxDeviations` | iterative | `100` | deepest deviation budget tried; `Infinity` for no cap |
 | `stopOnViolation` | iterative | `true` | stop at the first failing budget |
 
 A run that hits a limit reports `completed: false` and leaves the cache
-consistent; the next `explore` on it picks up where it stopped.
+consistent; the next `explore` on it picks up where it stopped. A callback
+that throws leaves it just as consistent: the call rejects, and the next one
+meets the same throw.
 
 Budgets are accepted as plain objects or as canonical `ValueMap<string,
 number>` values (`BudgetVector`); `toBudget` normalizes either form.
