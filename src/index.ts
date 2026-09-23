@@ -199,7 +199,8 @@ export interface ExploreResult {
    *  explored at whatever budgets. */
   exhaustive: boolean;
   timedOut: boolean;
-  /** Edges (i.e. `applyEvent` calls) computed during *this* call (cache misses only). */
+  /** Edges (i.e. `applyEvent` calls) computed during *this* call (cache
+   *  misses only); for `exploreIteratively`, during the whole run. */
   edgesAddedThisRun: number;
   /** Cumulative edges in the cache after this call. */
   edgesComputed: number;
@@ -889,7 +890,8 @@ export async function exploreIteratively<State, Event>(
   }
 
   const analysis = analyzeCache(cache, lastBudget);
-  return { ...lastResult, ...analysis, maxDeviationsReached };
+  // The last iteration's result, but the whole run's edges, as `maxEdges` counts them.
+  return { ...lastResult, ...analysis, maxDeviationsReached, edgesAddedThisRun: cache.edgesComputed - edgesAtStart };
 }
 
 // ---------------------------------------------------------------------------

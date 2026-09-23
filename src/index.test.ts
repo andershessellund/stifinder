@@ -398,6 +398,18 @@ describe('limits', () => {
     expect(space.budget.get(DEVIATIONS_KEY)).toBe(1);
   });
 
+  it('edgesAddedThisRun counts the whole iterative run, as maxEdges does', async () => {
+    // Budget 0 computes two edges, budget 1 three more.
+    const model = graph('0', { '0': [['a', [], '1'], ['b', [], '2']], '1': [['a', [], '3'], ['b', [], '4']], '2': [['a', [], '5']] });
+    const fresh = await exploreIteratively(model);
+    expect([fresh.edgesAddedThisRun, fresh.edgesComputed]).toEqual([5, 5]);
+    // On a kept cache, only the run's own edges.
+    const cache = new StateSpaceCache(model);
+    await explore(cache, {});
+    const kept = await exploreIteratively(cache);
+    expect([kept.edgesAddedThisRun, kept.edgesComputed]).toEqual([3, 5]);
+  });
+
   it('timeoutMs bounds the whole iterative run, not each iteration', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     let calls = 0;
