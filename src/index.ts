@@ -487,7 +487,7 @@ export class StateSpaceCache<State, Event> {
   async getEvents(state: State): Promise<Required<EventDescriptor<Event>>[]> {
     const cached = this.events.get(state);
     if (cached !== undefined) { this.counts.getEventsCacheHits++; return cached; }
-    const fresh = (await this.model.getEvents(state)).map((ev) => ({ event: ev.event, cost: ev.cost ?? NO_COST_KEYS }));
+    const fresh = (await this.model.getEvents(state)).map((ev) => ({ event: intern(ev.event), cost: ev.cost ?? NO_COST_KEYS }));
     for (const ev of fresh) {
       if (ev.cost.includes(DEVIATIONS_KEY)) {
         throw new Error(`stifinder: event cost must not include the reserved key ${DEVIATIONS_KEY}`);
@@ -524,10 +524,15 @@ export class StateSpaceCache<State, Event> {
       result = { error };
     }
     if ('to' in result) {
+      // The successor, canonical from here on, like the initial state and
+      // every event: each later lookup of it is a probe instead of a walk,
+      // results share one frozen copy, and a model that mutates a state it
+      // is given fails where it does, not somewhere later.
+      const to = intern(result.to);
       // An edge into a state that fails the invariant is an error edge: it
       // is stored, ordered and reported like any other, and carries the state.
-      const failure = await this.checkInvariant(result.to);
-      if (failure !== null) result = { error: failure.error, badState: intern(result.to) };
+      const failure = await this.checkInvariant(to);
+      result = failure === null ? { to } : { error: failure.error, badState: to };
     } else {
       // `badState` reports a state that failed a check, so it is the cache's
       // to add. An error from `applyEvent` is kept as the error alone.

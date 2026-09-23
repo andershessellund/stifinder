@@ -98,7 +98,10 @@ Two requirements, both consequences of caching:
   arrays, primitives, and its own collections. A `Date`, a native `Map`, or
   an unregistered class instance is rejected. See valsem's guide on
   [extending](https://github.com/andershessellund/valsem#extending) for
-  making your own classes values.
+  making your own classes values. The cache interns each state and event
+  once, so the ones your callbacks receive and the ones in results are
+  canonical and frozen: equal means `===`, and a callback that mutates a
+  state it is given throws there.
 
 ## Reading a result
 

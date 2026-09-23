@@ -1,3 +1,4 @@
+import { isCanonical } from 'valsem';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   type ApplyResult,
@@ -785,6 +786,37 @@ describe('describing a model', () => {
     expect(space.violation!.error).toBe('broken');
     expect('badState' in space.violation!).toBe(false);
     expect(space.transitions.get(0)).toEqual([{ event: 'go', index: 0, cost: [], error: 'broken' }]);
+  });
+
+  it('states and events are canonical: callbacks get frozen values, and results share them', async () => {
+    const space = await exploreIteratively<{ n: number }, { go: number }>({
+      initialState: { n: 0 },
+      getEvents: (s) => (s.n < 2 ? [{ event: { go: s.n } }] : []),
+      applyEvent: (s) => (s.n === 1 ? { error: 'two' } : { to: { n: s.n + 1 } }),
+    });
+    const [first, second] = space.violation!.steps;
+    for (const step of [first!, second!]) {
+      expect([isCanonical(step.state), isCanonical(step.event), Object.isFrozen(step.state)]).toEqual([true, true, true]);
+    }
+    // The state the second step starts from is the one the first step's transition reached.
+    const transition = space.transitions.get(first!.state)![0]!;
+    expect('to' in transition && transition.to).toBe(second!.state);
+  });
+
+  it('a model that mutates a state it is given fails there, whichever state it is', async () => {
+    const space = await exploreIteratively<{ n: number }, string>({
+      initialState: { n: 0 },
+      getEvents: (s) => (s.n < 3 ? [{ event: 'inc' }] : []),
+      applyEvent(s) {
+        if (s.n === 1) {
+          s.n = 2; // not allowed: a state is a value
+          return { to: s };
+        }
+        return { to: { n: s.n + 1 } };
+      },
+    });
+    expect(space.violation!.error).toBeInstanceOf(TypeError);
+    expect(space.violation!.steps.map((s) => s.state)).toEqual([{ n: 0 }, { n: 1 }]);
   });
 });
 
