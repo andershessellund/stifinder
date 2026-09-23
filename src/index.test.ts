@@ -264,6 +264,12 @@ describe('budgets and deviations', () => {
     await expect(explore(cache, {})).rejects.toThrow(DEVIATIONS_KEY);
   });
 
+  it('an unbounded deviation budget ends where the deviation levels do', async () => {
+    const cache = new StateSpaceCache(graph('0', { '0': [['a', [], '1'], ['b', [], '2']], '1': [['c', [], '2']] }));
+    expect(await explore(cache, { [DEVIATIONS_KEY]: Infinity })).toMatchObject({ completed: true, exhaustive: true });
+    expect(analyzeCache(cache, { [DEVIATIONS_KEY]: Infinity }).costs.size).toBe(3);
+  });
+
   it('charges a cost key once per occurrence', async () => {
     const config = graph('a', { a: [['e', ['x', 'x'], '!boom']] });
     const one = await exploreOnce(config, { x: 1 });
@@ -430,6 +436,50 @@ describe('limits', () => {
   });
 });
 
+describe('a callback that throws', () => {
+  // A pure model that throws throws again: the next call on the cache must
+  // meet the same throw, not find the edge gone and call the search complete.
+
+  it('rejects the call, and the next one, at the initial state', async () => {
+    const cache = new StateSpaceCache<string, string>({
+      initialState: 'start',
+      getEvents(state) {
+        if (state === 'start') throw new Error('no events for start');
+        return [];
+      },
+      applyEvent: () => ({ error: 'unreachable' }),
+    });
+    await expect(explore(cache, {})).rejects.toThrow('no events for start');
+    await expect(explore(cache, { [DEVIATIONS_KEY]: 5 })).rejects.toThrow('no events for start');
+    expect(cache.exhaustive).toBe(false);
+  });
+
+  it('mid-run, leaves the edge it interrupted, and the ones after it, to be tried again', async () => {
+    // `b` and `c` are traversed together, as one deviation at depth one; B throws.
+    const model = graph('0', { '0': [['a', [], 'A'], ['b', [], 'B'], ['c', [], 'C']], C: [['crash', [], '!crash']] });
+    const cache = new StateSpaceCache<string, string>({
+      ...model,
+      getEvents(state) {
+        if (state === 'B') throw new Error('no events for B');
+        return model.getEvents(state);
+      },
+    });
+    await expect(explore(cache, { [DEVIATIONS_KEY]: 1 })).rejects.toThrow('no events for B');
+    await expect(exploreIteratively(cache)).rejects.toThrow('no events for B');
+    expect(cache.exhaustive).toBe(false);
+  });
+
+  it('so does a successor state that valsem cannot intern', async () => {
+    const cache = new StateSpaceCache<unknown, string>({
+      initialState: 0,
+      getEvents: (state) => (state === 0 ? [{ event: 'go' }] : []),
+      applyEvent: () => ({ to: { at: new Date(0) } }),
+    });
+    await expect(explore(cache, {})).rejects.toThrow(/Date/);
+    await expect(explore(cache, {})).rejects.toThrow(/Date/);
+  });
+});
+
 describe('regressions', () => {
   it('reusing a cache across non-monotone budgets does not lose deferred edges', async () => {
     const config = graph('root', {
@@ -585,6 +635,35 @@ describe('exhaustive: what a result without a violation proves', () => {
 
     const withKey = await exploreIteratively(new StateSpaceCache(config), { baseBudget: { k: 1 } });
     expect(withKey.violation!.error).toBe('behind the lock');
+  });
+
+  it('a run stops deepening where no larger deviation budget could find more, however large maxDeviations is', async () => {
+    // Past one deviation, all that is left is `locked`, and no number of deviations buys a `k`.
+    const config = graph('0', { '0': [['free', [], 'end'], ['locked', ['k'], '!behind the lock']] });
+    for (const maxDeviations of [100, Infinity]) {
+      const space = await exploreIteratively(new StateSpaceCache(config), { maxDeviations });
+      expect(space).toMatchObject({ completed: true, violation: null, exhaustive: false, maxDeviationsReached: 1 });
+    }
+  });
+
+  it('a second run on a kept cache reports what the first one found', async () => {
+    const cache = new StateSpaceCache(twoDeep());
+    const first = await exploreIteratively(cache);
+    // Everything is in the cache now, but the failure is still two deviations deep.
+    const second = await exploreIteratively(cache);
+    expect(second.violation!.steps.map((s) => s.event)).toEqual(['stray', 'crash']);
+    expect(second).toMatchObject({ exhaustive: true, maxDeviationsReached: 2 });
+    expect(first).toMatchObject({ exhaustive: true, maxDeviationsReached: 2 });
+  });
+
+  it('is about the budget a result is for: a cache explored at a larger one holds more than it shows', async () => {
+    const cache = new StateSpaceCache(graph('0', { '0': [['free', [], 'end'], ['locked', ['k'], '!behind the lock']] }));
+    expect((await explore(cache, { k: 1, [DEVIATIONS_KEY]: 1 })).exhaustive).toBe(true);
+    expect(cache.exhaustive).toBe(true);
+    // Without a `k`, the violation behind the lock is out of sight: no proof.
+    expect((await explore(cache, { [DEVIATIONS_KEY]: 1 })).exhaustive).toBe(false);
+    const space = await exploreIteratively(cache);
+    expect(space).toMatchObject({ completed: true, violation: null, exhaustive: false, maxDeviationsReached: 1 });
   });
 
   it('can be true alongside a violation: an error edge leads nowhere further', async () => {

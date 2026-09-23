@@ -185,11 +185,14 @@ export interface ExploreResult {
    *  stopped early due to timeout or `maxEdges`. True says nothing about
    *  what a larger budget would reach: see `exhaustive`. */
   completed: boolean;
-  /** True iff no edge is left to traverse at ANY budget: every state the
-   *  model can reach has been explored, however many deviations or units of
-   *  any cost key it takes. Together with `violation: null` that is a proof
-   *  that the model has no violation; `completed` alone only clears the
-   *  budget that was explored. */
+  /** True iff every state the model can reach has been explored, however
+   *  many deviations or units of any cost key it takes, and all of it lies
+   *  within the budget of this call (for `exploreIteratively`, the last one
+   *  it tried). The projection at that budget is then the whole state space,
+   *  and together with `violation: null` that is a proof that the model has
+   *  no violation. `completed` alone only clears the budget that was
+   *  explored; `cache.exhaustive` only says that the cache holds everything,
+   *  explored at whatever budgets. */
   exhaustive: boolean;
   timedOut: boolean;
   /** Edges (i.e. `applyEvent` calls) computed during *this* call (cache misses only). */
@@ -225,8 +228,10 @@ export interface CacheAnalysis<State, Event> {
 export interface StateSpace<State, Event>
   extends ExploreResult, CacheAnalysis<State, Event> {
   /** Highest deviation budget for which exploration completed. -1 if none
-   *  completed. When the run stopped early, `budget` is one higher and the
-   *  projection at it is partial. */
+   *  completed. When the run hit a limit, `budget` is one higher and the
+   *  projection at it is partial. A run that completes stops short of
+   *  `maxDeviations` only at a violation, or where no larger deviation
+   *  budget could find anything more. */
   maxDeviationsReached: number;
 }
 
@@ -282,6 +287,19 @@ function addCost(base: CostVector, costKeys: readonly string[], chargesDeviation
   let result = base;
   for (const k of costKeys) result = result.set(k, (result.get(k) ?? 0) + 1);
   if (chargesDeviation) result = result.set(DEVIATIONS_KEY, (result.get(DEVIATIONS_KEY) ?? 0) + 1);
+  return result;
+}
+
+/** True iff one of `arrivals` costs `≤ cost`: an arrival at `cost` would add nothing. */
+function isDominated(arrivals: ReadonlyMap<CostVector, unknown>, cost: CostVector): boolean {
+  for (const c of arrivals.keys()) if (costLE(c, cost)) return true;
+  return false;
+}
+
+/** The componentwise maximum of `a` and `b`. */
+function costMax(a: CostVector, b: CostVector): CostVector {
+  let result = a;
+  for (const [k, v] of b.entries()) if (v > (result.get(k) ?? 0)) result = result.set(k, v);
   return result;
 }
 
@@ -373,6 +391,10 @@ export class StateSpaceCache<State, Event> {
   initialError: { error: unknown } | null = null;
   /** Cumulative list of error edges discovered. Used by `analyzeCache`. */
   readonly errorEdges: ErrorEdgeEntry<State, Event>[] = [];
+  /** @internal The componentwise maximum of every cost recorded, in
+   *  `reached` and in `errorEdges`: a budget at least this large sees the
+   *  whole cache. */
+  costCeiling: CostVector = EMPTY_COST;
   /** Edges not yet traversed, bucketed by successor deviation count and
    *  then by successor depth. Empty (together with `deferred`) means the
    *  entire reachable state space, under any future budget, has been
@@ -499,18 +521,33 @@ export class StateSpaceCache<State, Event> {
     depth: number,
     pred: PredecessorEntry<State, Event> | null,
   ): CostEntry<State, Event> | null {
-    let existing = this.reached.get(state);
-    if (existing === undefined) {
-      existing = new Map();
-      this.reached.set(state, existing);
-    } else {
-      for (const c of existing.keys()) {
-        if (costLE(c, newCost)) return null;
-      }
-    }
+    const arrivals = this.reached.get(state);
+    if (arrivals !== undefined && isDominated(arrivals, newCost)) return null;
     const entry: CostEntry<State, Event> = { depth, pred };
-    existing.set(newCost, entry);
+    this.recordArrival(state, arrivals, newCost, entry);
     return entry;
+  }
+
+  /** @internal Record an arrival already known not to be dominated.
+   *  `arrivals` is `reached.get(state)`, as the caller looked it up. */
+  recordArrival(
+    state: State,
+    arrivals: Map<CostVector, CostEntry<State, Event>> | undefined,
+    cost: CostVector,
+    entry: CostEntry<State, Event>,
+  ): void {
+    if (arrivals === undefined) {
+      arrivals = new Map();
+      this.reached.set(state, arrivals);
+    }
+    arrivals.set(cost, entry);
+    this.costCeiling = costMax(this.costCeiling, cost);
+  }
+
+  /** @internal Record an error edge found by exploration. */
+  addErrorEdge(entry: ErrorEdgeEntry<State, Event>): void {
+    this.errorEdges.push(entry);
+    this.costCeiling = costMax(this.costCeiling, entry.totalCost);
   }
 }
 
@@ -593,10 +630,14 @@ async function exploreLocked<State, Event>(
     bucket.push(item);
   };
 
-  // Seed one pending edge per outgoing event of `state`, reached at `cost`
-  // after `depth` steps.
-  const seedPending = async (state: State, cost: CostVector, depth: number): Promise<void> => {
-    const events = await cache.getEvents(state);
+  // Seed one pending edge per event of `state`, reached at `cost` after
+  // `depth` steps.
+  const seedPending = (
+    state: State,
+    cost: CostVector,
+    depth: number,
+    events: readonly Required<EventDescriptor<Event>>[],
+  ): void => {
     for (let k = 0; k < events.length; k++) {
       const ev = events[k]!;
       const successorCost = addCost(cost, ev.cost, k !== 0);
@@ -604,12 +645,20 @@ async function exploreLocked<State, Event>(
     }
   };
 
+  // A model's callbacks may throw, and so may valsem, given a state it cannot
+  // intern. So whatever can throw comes before an arrival is recorded, and an
+  // edge leaves `pending` for good only once it has been traversed: a call
+  // that rejects leaves the cache as consistent as one that hits a limit, and
+  // the next call meets the same throw instead of finding the edge gone.
+
   // Lazy seed on first explore call against a fresh cache.
   if (cache.reached.size === 0) {
-    cache.addCostEntry(cache.initialState, EMPTY_COST, 0, null);
-    cache.initialError = await cache.checkInvariant(cache.initialState);
+    const initialError = await cache.checkInvariant(cache.initialState);
     // As with any state that fails the invariant, nothing is explored beyond it.
-    if (cache.initialError === null) await seedPending(cache.initialState, EMPTY_COST, 0);
+    const events = initialError === null ? await cache.getEvents(cache.initialState) : [];
+    cache.addCostEntry(cache.initialState, EMPTY_COST, 0, null);
+    cache.initialError = initialError;
+    seedPending(cache.initialState, EMPTY_COST, 0, events);
   }
 
   // Re-inject every deferred edge that this call's budget can afford.
@@ -624,77 +673,96 @@ async function exploreLocked<State, Event>(
 
   const budgetDev = budget.get(DEVIATIONS_KEY) ?? 0;
 
+  // The lowest deviation level from `from` up with edges waiting, within the
+  // budget. Only levels that exist are visited, so even an unbounded
+  // deviation budget ends where the levels do.
+  const nextLevel = (from: number): number | undefined => {
+    let next: number | undefined;
+    for (const d of cache.pending.keys()) {
+      if (d >= from && d <= budgetDev && (next === undefined || d < next)) next = d;
+    }
+    return next;
+  };
+
   // Edges deferred this call (unaffordable in a non-deviation dimension).
-  // Moved to `cache.deferred` once the loop ends.
+  // Moved to `cache.deferred` once the loop ends, however it ends.
   const deferredThisCall: PendingEdge<State, Event>[] = [];
 
-  outer: for (let dev = 0; dev <= budgetDev; dev++) {
-    const level = cache.pending.get(dev);
-    if (level === undefined) continue;
+  try {
+    outer: for (let dev = nextLevel(0); dev !== undefined; dev = nextLevel(dev + 1)) {
+      const level = cache.pending.get(dev)!;
 
-    while (level.size > 0) {
-      let depth = Infinity;
-      for (const d of level.keys()) if (d < depth) depth = d;
-      const bucket = level.get(depth)!;
-      level.delete(depth);
+      while (level.size > 0) {
+        let depth = Infinity;
+        for (const d of level.keys()) if (d < depth) depth = d;
+        const bucket = level.get(depth)!;
+        level.delete(depth);
 
-      for (let bi = 0; bi < bucket.length; bi++) {
-        const item = bucket[bi]!;
+        let bi = 0;
+        try {
+          for (; bi < bucket.length; bi++) {
+            const item = bucket[bi]!;
 
-        if (deadline !== undefined && Date.now() >= deadline) {
-          timedOut = true;
+            if (deadline !== undefined && Date.now() >= deadline) {
+              timedOut = true;
+              break outer;
+            }
+
+            // An item at level `dev` has that many deviations; only the
+            // non-deviation dimensions can still be unaffordable.
+            if (!costLE(item.cost, budget)) {
+              deferredThisCall.push(item);
+              continue;
+            }
+
+            if (cache.edgesComputed >= edgeLimit && !cache.hasApplied(item.from, item.event)) {
+              stoppedEarly = true;
+              break outer;
+            }
+
+            const result = await cache.applyEvent(item.from, item.event);
+            if ('error' in result) {
+              cache.addErrorEdge({
+                from: item.from,
+                fromCost: item.fromCost,
+                event: item.event,
+                index: item.index,
+                totalCost: item.cost,
+                depth: item.depth,
+                error: result.error,
+                ...('badState' in result ? { badState: result.badState } : {}),
+              });
+              continue;
+            }
+
+            // An arrival that is no cheaper than one already recorded adds
+            // nothing. For one that is, the state's events are asked for
+            // before the arrival is recorded.
+            const arrivals = cache.reached.get(result.to);
+            if (arrivals !== undefined && isDominated(arrivals, item.cost)) continue;
+            const events = await cache.getEvents(result.to);
+            cache.recordArrival(result.to, arrivals, item.cost, {
+              depth: item.depth,
+              pred: { from: item.from, fromCost: item.fromCost, event: item.event, index: item.index },
+            });
+            seedPending(result.to, item.cost, item.depth, events);
+          }
+        } finally {
+          // What was not traversed goes back: after a limit, and after a throw.
           for (let r = bi; r < bucket.length; r++) pushPending(bucket[r]!);
-          break outer;
-        }
-
-        // An item at level `dev` has that many deviations; only the
-        // non-deviation dimensions can still be unaffordable.
-        if (!costLE(item.cost, budget)) {
-          deferredThisCall.push(item);
-          continue;
-        }
-
-        if (cache.edgesComputed >= edgeLimit && !cache.hasApplied(item.from, item.event)) {
-          stoppedEarly = true;
-          for (let r = bi; r < bucket.length; r++) pushPending(bucket[r]!);
-          break outer;
-        }
-
-        const result = await cache.applyEvent(item.from, item.event);
-        if ('error' in result) {
-          cache.errorEdges.push({
-            from: item.from,
-            fromCost: item.fromCost,
-            event: item.event,
-            index: item.index,
-            totalCost: item.cost,
-            depth: item.depth,
-            error: result.error,
-            ...('badState' in result ? { badState: result.badState } : {}),
-          });
-          continue;
-        }
-
-        const added = cache.addCostEntry(result.to, item.cost, item.depth, {
-          from: item.from,
-          fromCost: item.fromCost,
-          event: item.event,
-          index: item.index,
-        });
-        if (added !== null) {
-          await seedPending(result.to, item.cost, item.depth);
         }
       }
+
+      cache.pending.delete(dev);
     }
-
-    cache.pending.delete(dev);
+  } finally {
+    for (const item of deferredThisCall) cache.deferred.push(item);
   }
-
-  for (const item of deferredThisCall) cache.deferred.push(item);
 
   return {
     completed: !timedOut && !stoppedEarly,
-    exhaustive: cache.exhaustive,
+    // The whole state space is in the cache, and within this budget.
+    exhaustive: cache.exhaustive && costLE(cache.costCeiling, budget),
     timedOut,
     edgesAddedThisRun: cache.edgesComputed - edgesAtStart,
     edgesComputed: cache.edgesComputed,
@@ -734,7 +802,7 @@ export function analyzeCache<State, Event>(
 // Each iteration deepens the deviation budget. With the incremental
 // cache, iteration d only traverses pending edges at deviation level d
 // (plus anything they newly reach). Stops early when the first violation
-// appears, or when no pending or deferred edges remain.
+// appears, or when no larger deviation budget could find anything more.
 // ---------------------------------------------------------------------------
 
 export async function exploreIteratively<State, Event>(
@@ -754,6 +822,9 @@ export async function exploreIteratively<State, Event>(
   let lastResult: ExploreResult | null = null;
   let lastBudget: BudgetVector = baseBudget.set(DEVIATIONS_KEY, 0);
   let maxDeviationsReached = -1;
+  // The base budget with any number of deviations: all that an edge held
+  // back by the base budget could ever be given in this run.
+  const anyDeviations: BudgetVector = baseBudget.set(DEVIATIONS_KEY, Infinity);
 
   for (let d = 0; d <= maxDeviations; d++) {
     const budget: BudgetVector = baseBudget.set(DEVIATIONS_KEY, d);
@@ -767,9 +838,17 @@ export async function exploreIteratively<State, Event>(
     maxDeviationsReached = d;
     // Cheap violation existence check: O(|errorEdges|), no projection.
     if (stopOnViolation && findShortestViolation(cache, budget) !== null) break;
-    // Nothing pending or deferred: the entire reachable state space has
-    // been explored, and no larger budget can find anything more.
-    if (result.exhaustive) break;
+    // No larger deviation budget could find anything more: no edge waits at
+    // a higher level, every edge held back needs more than the base budget,
+    // and nothing in the cache takes more deviations than this budget allows
+    // (a cache explored earlier at a larger budget can hold such things).
+    if (
+      cache.pending.size === 0 &&
+      (cache.costCeiling.get(DEVIATIONS_KEY) ?? 0) <= d &&
+      !cache.deferred.some((item) => costLE(item.cost, anyDeviations))
+    ) {
+      break;
+    }
   }
 
   // Guarantee a non-null lastResult even if maxDeviations < 0 (defensive).
