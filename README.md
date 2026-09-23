@@ -260,6 +260,10 @@ meets the same throw.
 Budgets are accepted as plain objects or as canonical `ValueMap<string,
 number>` values (`BudgetVector`); `toBudget` normalizes either form.
 
+Every allowance in a budget, and `maxEdges` and `timeoutMs`, must be a
+number, zero or more, with `Infinity` for no limit; `maxDeviations` must also
+be whole. Anything else, `NaN` included, is a `RangeError`.
+
 ## Requirements
 
 Node 22 or newer, ES modules, TypeScript types included.

@@ -493,6 +493,37 @@ describe('a callback that throws', () => {
   });
 });
 
+describe('checked input', () => {
+  // A NaN or negative limit used to be read as no limit, or as zero:
+  // `Number(process.env.X)`, with X unset, is NaN.
+
+  it('a budget allowance must be a number, zero or more', async () => {
+    const cache = new StateSpaceCache(graph('0', { '0': [['a', ['x'], '1']] }));
+    const budgets: Record<string, number>[] = [{ x: NaN }, { x: -1 }, { [DEVIATIONS_KEY]: NaN }, { [DEVIATIONS_KEY]: -1 }];
+    for (const budget of budgets) {
+      await expect(explore(cache, budget)).rejects.toThrow(RangeError);
+      expect(() => analyzeCache(cache, budget)).toThrow(RangeError);
+    }
+    await expect(exploreIteratively(cache, { baseBudget: { x: NaN } })).rejects.toThrow(/budget for x/);
+    // Infinity is no limit.
+    expect(await explore(cache, { x: Infinity, [DEVIATIONS_KEY]: Infinity })).toMatchObject({ completed: true, exhaustive: true });
+  });
+
+  it('so must maxEdges and timeoutMs, and maxDeviations must be whole', async () => {
+    const model = graph('0', { '0': [['a', [], '1']] });
+    for (const options of [{ maxEdges: NaN }, { maxEdges: -1 }, { timeoutMs: NaN }, { timeoutMs: -5 }]) {
+      await expect(explore(new StateSpaceCache(model), {}, options)).rejects.toThrow(RangeError);
+      await expect(exploreIteratively(model, options)).rejects.toThrow(RangeError);
+    }
+    for (const maxDeviations of [NaN, -1, 1.5]) {
+      await expect(exploreIteratively(model, { maxDeviations })).rejects.toThrow(/maxDeviations/);
+    }
+    // Infinity is no limit, for each of them.
+    const unlimited = await exploreIteratively(model, { maxEdges: Infinity, timeoutMs: Infinity, maxDeviations: Infinity });
+    expect(unlimited).toMatchObject({ completed: true, exhaustive: true });
+  });
+});
+
 describe('regressions', () => {
   it('reusing a cache across non-monotone budgets does not lose deferred edges', async () => {
     const config = graph('root', {

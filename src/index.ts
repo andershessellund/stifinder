@@ -60,9 +60,35 @@ export type BudgetVector = CostVector;
 /** Public API input form: accepts either a plain object or a `BudgetVector`. */
 export type BudgetLike = BudgetVector | Readonly<Record<string, number>>;
 
-/** Normalize an API-boundary budget input to a canonical `BudgetVector`. */
+/**
+ * Normalize an API-boundary budget input to a canonical `BudgetVector`.
+ * Every allowance must be a number, zero or more (`Infinity` for no limit);
+ * anything else is a `RangeError`, not a limit read some other way.
+ */
 export function toBudget(b: BudgetLike): BudgetVector {
-  return b instanceof ValueMap ? b : ValueMap.fromObject<number>(b);
+  const budget = b instanceof ValueMap ? b : ValueMap.fromObject<number>(b);
+  for (const [key, allowance] of budget.entries()) checkNotNegative(`the budget for ${key}`, allowance);
+  return budget;
+}
+
+/** Throw a `RangeError` unless `value` is a number, zero or more. */
+function checkNotNegative(what: string, value: unknown): void {
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) {
+    throw new RangeError(`stifinder: ${what} must be a number, zero or more (Infinity for no limit), not ${String(value)}`);
+  }
+}
+
+/** Check the limits an option object gives; a missing one is the default. */
+function checkLimits(options: ExploreOptions | IterativeOptions | undefined): void {
+  if (options?.maxEdges !== undefined) checkNotNegative('maxEdges', options.maxEdges);
+  if (options?.timeoutMs !== undefined) checkNotNegative('timeoutMs', options.timeoutMs);
+  if (options !== undefined && 'maxDeviations' in options && options.maxDeviations !== undefined) {
+    const d = options.maxDeviations;
+    checkNotNegative('maxDeviations', d);
+    if (!Number.isInteger(d) && d !== Infinity) {
+      throw new RangeError(`stifinder: maxDeviations must be a whole number (or Infinity), not ${d}`);
+    }
+  }
 }
 
 /** Reserved budget key counting non-preferred event choices along a path. */
@@ -605,6 +631,7 @@ export async function explore<State, Event>(
   budget: BudgetLike,
   options?: ExploreOptions,
 ): Promise<ExploreResult> {
+  checkLimits(options);
   const timeoutMs = options?.timeoutMs;
   return exploreUntil(cache, toBudget(budget), {
     maxEdges: options?.maxEdges ?? DEFAULT_MAX_EDGES,
@@ -842,6 +869,7 @@ export async function exploreIteratively<State, Event>(
   cacheOrModel: StateSpaceCache<State, Event> | Model<State, Event>,
   options?: IterativeOptions,
 ): Promise<StateSpace<State, Event>> {
+  checkLimits(options);
   // A bare model gets a cache for the length of this run. Pass a cache to
   // keep it: to resume a run that hit a limit, or to analyze other budgets.
   const cache = cacheOrModel instanceof StateSpaceCache ? cacheOrModel : new StateSpaceCache(cacheOrModel);
@@ -884,14 +912,10 @@ export async function exploreIteratively<State, Event>(
     }
   }
 
-  // Guarantee a non-null lastResult even if maxDeviations < 0 (defensive).
-  if (lastResult === null) {
-    lastResult = await exploreUntil(cache, lastBudget, { maxEdges, deadline });
-  }
-
+  // `maxDeviations` is at least 0, so the loop ran at least once.
   const analysis = analyzeCache(cache, lastBudget);
   // The last iteration's result, but the whole run's edges, as `maxEdges` counts them.
-  return { ...lastResult, ...analysis, maxDeviationsReached, edgesAddedThisRun: cache.edgesComputed - edgesAtStart };
+  return { ...lastResult!, ...analysis, maxDeviationsReached, edgesAddedThisRun: cache.edgesComputed - edgesAtStart };
 }
 
 // ---------------------------------------------------------------------------
