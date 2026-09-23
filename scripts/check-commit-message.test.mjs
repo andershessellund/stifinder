@@ -1,3 +1,8 @@
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import { check } from './check-commit-message.mjs';
 
@@ -54,6 +59,23 @@ describe('check-commit-message: what release-please will read from a PR', () => 
     expect(check('fix: x', 'BEGIN_COMMIT_OVERRIDE\n\nEND_COMMIT_OVERRIDE', 1).problems[0]).toMatch(/empty/);
     const open = check('fix: x', 'Prose.\n\nBEGIN_COMMIT_OVERRIDE\nfix: entry\n\nand then the rest of the description', 1);
     expect(open.problems.some((p) => /no END_COMMIT_OVERRIDE/.test(p))).toBe(true);
+  });
+
+  it('runs as a script from any path: one with a space in it, or through a symlink', () => {
+    // From such a path the check used to pass without running.
+    const dir = mkdtempSync(join(tmpdir(), 'check commit '));
+    try {
+      const link = join(dir, 'check.mjs');
+      symlinkSync(fileURLToPath(new URL('check-commit-message.mjs', import.meta.url)), link);
+      const run = spawnSync(process.execPath, [link], {
+        env: { ...process.env, PR_TITLE: 'not a conventional title', PR_BODY: '', PR_NUMBER: '1' },
+        encoding: 'utf8',
+      });
+      expect(run.stdout).toMatch(/The PR title cannot be parsed/);
+      expect(run.status).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('handles CRLF descriptions, which is what the GitHub web editor produces', () => {

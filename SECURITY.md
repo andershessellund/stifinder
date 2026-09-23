@@ -43,10 +43,14 @@ Out of scope, by design:
 ## How releases are protected
 
 Published versions are built and staged by GitHub Actions from a tagged commit,
-authenticated to npm by OIDC trusted publishing: no npm token exists. A staged
-version goes live only after the maintainer approves it with a second factor,
-and carries a provenance attestation linking it to its source commit and
-workflow run. Release tags cannot be moved or deleted.
+authenticated to npm by OIDC trusted publishing: no npm token exists. The
+tarball is packed in a job whose only running package code is the TypeScript
+compiler, and published from a job that installs nothing but npm. The tests,
+the linter and the rest of the toolchain run in a third job, which holds
+neither the tarball nor the credential. A staged version goes live only after
+the maintainer approves it with a second factor, and carries a provenance
+attestation linking it to its source commit and workflow run. Release tags
+cannot be moved or deleted.
 
 Version 0.0.1 predates this pipeline: it was published by hand and carries no
 provenance attestation.

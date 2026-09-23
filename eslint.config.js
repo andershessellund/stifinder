@@ -1,8 +1,9 @@
+import { defineConfig } from 'eslint/config';
 import tseslint from 'typescript-eslint';
 
-export default tseslint.config(
+export default defineConfig(
   { ignores: ['dist/'] },
-  ...tseslint.configs.recommendedTypeChecked,
+  tseslint.configs.recommendedTypeChecked,
   {
     languageOptions: {
       parserOptions: { project: './tsconfig.tests.json', tsconfigRootDir: import.meta.dirname },
@@ -14,5 +15,5 @@ export default tseslint.config(
     },
   },
   // Plain JavaScript (this file, scripts/) is in no tsconfig project.
-  { files: ['**/*.js', '**/*.mjs'], ...tseslint.configs.disableTypeChecked },
+  { files: ['**/*.js', '**/*.mjs'], extends: [tseslint.configs.disableTypeChecked] },
 );
