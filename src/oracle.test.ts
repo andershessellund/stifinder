@@ -19,11 +19,13 @@ import {
   type BudgetLike,
   type CacheAnalysis,
   type Model,
+  type ViolationPath,
   DEVIATIONS_KEY,
   StateSpaceCache,
   analyzeCache,
   explore,
   exploreIteratively,
+  shortestViolation,
 } from './index.js';
 
 const RUNS = Number(process.env.FUZZ_RUNS ?? 300);
@@ -193,18 +195,24 @@ function randomBudget(r: Random): Cost {
   return { dev: r.chance(0.15) ? Infinity : r.int(4), x: r.int(3), y: r.int(3) };
 }
 
-/** `analysis` is what the oracle says holds at `budget`, and its trace is real. */
+/** `analysis` is what the oracle says holds at `budget`, and its traces are real. */
 function expectAgrees(spec: Spec, budget: Cost, analysis: CacheAnalysis<number, string>, context: string): void {
   const where = `${context}; budget ${show(budget)}; model ${show(spec)}`;
   const truth = oracle(spec, budget);
-  const v = analysis.violation;
-  expect(v === null ? null : [toCost(v.cost).dev, sum(toCost(v.cost)), v.steps.length], where).toEqual(truth.rank);
   expect(describeFrontier(new Map([...analysis.costs].map(([s, cs]) => [s, cs.map(toCost)]))), where).toEqual(
     describeFrontier(truth.frontier),
   );
-  if (v === null) return;
+  // Both searches find a violation of the least rank (of several that tie,
+  // not necessarily the same one), and a real trace to it.
+  const found = { 'analysis.violation': analysis.violation, 'shortestViolation(analysis)': shortestViolation(analysis) };
+  for (const [name, v] of Object.entries(found)) {
+    expect(v === null ? null : [toCost(v.cost).dev, sum(toCost(v.cost)), v.steps.length], `${where}; ${name}`).toEqual(truth.rank);
+    if (v !== null) expectReplays(spec, v, `${where}; ${name}`);
+  }
+}
 
-  // Replay the trace on the model.
+/** `v` is a path in the model, with the indexes, costs, error and badState it claims. */
+function expectReplays(spec: Spec, v: ViolationPath<number, string>, where: string): void {
   let s = 0;
   let c: Cost = { dev: 0, x: 0, y: 0 };
   let error: unknown = null;

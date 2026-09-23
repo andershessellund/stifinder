@@ -94,7 +94,9 @@ TypeScript types.
 Breaking, and therefore a major version:
 
 - removing or renaming an export, or changing a signature incompatibly;
-- changing which violation is reported for a given model and budget;
+- changing which violation is reported for a given model and budget, up to
+  ties: of several with the same deviations, other cost and steps, which
+  one is reported follows the order of exploration, and may change;
 - changing how cost is counted: what charges a deviation, or how cost keys add up;
 - raising the floor: the minimum Node version, or the lower bound of the
   `valsem` peer range.
