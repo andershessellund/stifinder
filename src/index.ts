@@ -756,12 +756,26 @@ async function exploreLocked<State, Event>(
   try {
     outer: for (let dev = nextLevel(0); dev !== undefined; dev = nextLevel(dev + 1)) {
       const level = cache.pending.get(dev)!;
+      // Within a call a level only grows deeper: deferred edges came back
+      // before the loop, and traversing an edge queues edges one step
+      // deeper. So its depths are taken in turn from the shallowest, instead
+      // of each being searched for, which made a long run quadratic.
+      let depth = Infinity;
+      let deepest = -Infinity;
+      for (const d of level.keys()) {
+        depth = Math.min(depth, d);
+        deepest = Math.max(deepest, d);
+      }
 
-      while (level.size > 0) {
-        let depth = Infinity;
-        for (const d of level.keys()) if (d < depth) depth = d;
-        const bucket = level.get(depth)!;
+      for (; level.size > 0; depth++) {
+        const bucket = level.get(depth);
+        if (bucket === undefined) {
+          // A gap between depths; past the deepest there is nothing left.
+          if (depth > deepest) throw new Error('stifinder: internal error: edges queued at a depth already explored');
+          continue;
+        }
         level.delete(depth);
+        deepest = Math.max(deepest, depth + 1);
 
         let bi = 0;
         try {
