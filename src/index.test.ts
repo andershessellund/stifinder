@@ -521,6 +521,14 @@ describe('regressions', () => {
     expectConsistent(atOne);
   });
 
+  it('shortestViolation(analysis) ends on any budget, an unbounded one included', async () => {
+    // A deviation back to where it started: a cycle that costs one deviation a lap.
+    const model = graph('0', { '0': [['on', [], '1'], ['back', [], '0']], '1': [['crash', [], '!crash']] });
+    const result = await exploreOnce(model, { [DEVIATIONS_KEY]: Infinity });
+    expect(shortestViolation(result)!.error).toBe('crash');
+    expectConsistent(result);
+  });
+
   it('prefers the trace with the fewest steps among equal-cost violations', async () => {
     // Preferred chain 0..10 with a deviation at 10 that fails after 11 steps;
     // a deviation at 0 fails after 4 steps. Both cost exactly one deviation.

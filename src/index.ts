@@ -1060,9 +1060,17 @@ function shortestViolationFromTransitions<State, Event>(
   type Parent = { from: Node; event: Event; index: number } | null;
   const parents = new HashMap<Node, Parent>();
   const queue: Node[] = [];
+  // The costs each state has been reached at. A node reached at a cost no
+  // lower than one already seen for its state is skipped: anything that
+  // follows it also follows the cheaper node, and ranks strictly better
+  // there, so the result is the same. And the search ends at any budget,
+  // since with finitely many cost keys a sequence of costs in which none is
+  // at least an earlier one is finite (Dickson's lemma).
+  const seen = new HashMap<State, CostVector[]>();
 
   const root: Node = { state: initialState, cost: EMPTY_COST };
   parents.set(root, null);
+  seen.set(initialState, [EMPTY_COST]);
   queue.push(root);
 
   // Plain BFS visits nodes in depth order; among violations found, keep
@@ -1090,11 +1098,13 @@ function shortestViolationFromTransitions<State, Event>(
         continue;
       }
 
+      const costs = seen.get(t.to);
+      if (costs?.some((c) => costLE(c, cost))) continue;
+      if (costs === undefined) seen.set(t.to, [cost]);
+      else costs.push(cost);
       const successor: Node = { state: t.to, cost };
-      if (!parents.has(successor)) {
-        parents.set(successor, { from: current, event: t.event, index: t.index });
-        queue.push(successor);
-      }
+      parents.set(successor, { from: current, event: t.event, index: t.index });
+      queue.push(successor);
     }
   }
 
