@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  type ApplyResult,
   type CacheAnalysis,
   type EventDescriptor,
   type ExplorerConfig,
@@ -402,11 +403,11 @@ describe('limits', () => {
     let calls = 0;
     const cache = new StateSpaceCache(makeConfig({ heads: 0, tossesRemaining: 3 }));
     const slow: ExplorerConfig<CoinState, CoinEvent> = {
-      ...cache.config,
+      ...cache.model,
       async applyEvent(state, event) {
         calls++;
         vi.advanceTimersByTime(4);
-        return cache.config.applyEvent(state, event);
+        return cache.model.applyEvent(state, event);
       },
     };
     const space = await exploreIteratively(new StateSpaceCache(slow), { timeoutMs: 10 });
@@ -719,6 +720,37 @@ describe('describing a model', () => {
     const config: ExplorerConfig<string, string> = graph('0', { '0': [['a', [], '1']] });
     const model: Model<string, string> = config;
     expect((await exploreIteratively(model)).exhaustive).toBe(true);
+  });
+
+  it('applyEvent returns { to } or { error }: badState is the cache\'s to add', async () => {
+    // @ts-expect-error `badState` reports a state that failed a check; a model does not return one
+    const typed: ApplyResult<number> = { error: 'broken', badState: 42 };
+    expect(typed).toMatchObject({ error: 'broken' });
+
+    // The types do not see every return (an arrow function's literal is not
+    // checked for extra properties), so the cache drops one it is given.
+    const model: Model<number, string> = { initialState: 0, getEvents: () => [{ event: 'go' }], applyEvent: () => ({ error: 'broken', badState: 42 }) };
+    const space = await exploreIteratively(model);
+    expect(space.violation!.error).toBe('broken');
+    expect('badState' in space.violation!).toBe(false);
+    expect(space.transitions.get(0)).toEqual([{ event: 'go', index: 0, cost: [], error: 'broken' }]);
+  });
+});
+
+describe('what a cache offers', () => {
+  it('the model, the initial state, exhaustive, statesExplored and the counters', async () => {
+    const model = graph('0', { '0': [['a', [], '1']] });
+    const cache = new StateSpaceCache(model);
+    await explore(cache, {});
+    expect(cache.model).toBe(model);
+    expect(cache.config).toBe(model); // the old name, deprecated
+    expect(cache).toMatchObject({ initialState: '0', exhaustive: true, statesExplored: 2, edgesComputed: 1, exploreCalls: 1 });
+  });
+
+  it('the counters are read-only', () => {
+    const cache = new StateSpaceCache(graph('0', {}));
+    expect(Reflect.set(cache, 'edgesComputed', 5)).toBe(false);
+    expect(cache.edgesComputed).toBe(0);
   });
 });
 
