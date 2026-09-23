@@ -26,7 +26,8 @@ pnpm check:package   # publint and are-the-types-wrong, on the packed tarball
 
 CI runs the first four on Node 22 and on the latest Node, and the last one
 once: it checks what the tests cannot see, since the tests import from `src/`
-(the `exports` map, how the published types resolve).
+(the `exports` map, how the published types resolve). It also runs the
+typecheck and the tests against the oldest `valsem` the peer range admits.
 
 Tests sit beside the source, in `src/`. The examples in `examples/` have tests
 too: the README quotes their output, and the tests are what keeps it true.
