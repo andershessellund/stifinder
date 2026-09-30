@@ -59,20 +59,38 @@ index it is, and whether or not the index-0 event is affordable.
 failure is measured by how far it strays from it. This follows delay
 bounding (Emmi, Qadeer & Rakamarić, "Delay-bounded scheduling", POPL 2011):
 a deterministic scheduler with a bounded number of departures from its
-default choice. **Not
-recorded:** why a departure costs one whichever alternative it takes, where
-delay bounding charges *k* for the *k*-th alternative, and why the charge
-ignores whether index 0 is affordable. The difference from the paper was
-noticed in review and documented (#17), not decided then. **Cost.** How a
-deviation is charged is API: changing it is a major version (D23).
-DESIGN.md §3.1.
+default choice.
+
+Delay bounding charges *k* for the scheduler's *k*-th alternative, since a
+delay skips one task. Why stifinder charges one was not written down when
+it was built; the difference was noticed in review (#17). The case for it,
+as argued on 2026-09-30: the flat charge is the more primitive of the two.
+A model gets delay bounding exactly by offering `[run next, delay]` with
+the scheduler's cursor in its state, where each delay is index 1; nothing
+built on a charge by index could say that two alternatives are equally
+surprising, which is what they are when they are a set and not a queue
+(which philosopher cuts in, which value a decision picks). In the dining
+philosophers every cut-in is index 1, and both charges count four.
+**Rejected:** charging the index. What it buys is real: with *I*
+scheduling points and *C* choices at each, *K* delays reach at most *I^K*
+schedules, independent of *C*, where the flat charge reaches about
+*(I·C)^K*. For sixteen tasks of three steps and a budget of 3, that is
+18,262 complete schedules against 7,898,781, and an empirical study of 52
+buggy programs found delay bounding the better of the two (Thomson,
+Donaldson & Betts, PPoPP 2014). But a model with wide menus can have it by
+the encoding above, at one more state and step per delay. **Not recorded:**
+why the charge ignores whether index 0 is affordable. **Cost.** A wide flat
+menu multiplies every deviation budget by its width. How a deviation is
+charged is API: changing it is a major version (D23). A charge the model
+sets per event is under Open. DESIGN.md §3.1.
 
 ### D4. Cost is a vector of named keys, and a budget a vector of allowances
 
 An event lists the keys it consumes, one unit per occurrence. A path's cost
-is the sum; a budget allows so much of each key. `__deviations__` is one
-key of the same vector, reserved: it is counted by the search, and an event
-that lists it is rejected.
+is the sum; a budget allows so much of each key it names (D32).
+`__deviations__` and `__steps__` (D31) are keys of the same vector,
+reserved: they are counted by the search, and an event that lists either is
+rejected.
 
 **Why.** A system's faults are of different kinds, and a test bounds them
 separately: one lost message, no crash, any number of reorderings. The
@@ -81,6 +99,86 @@ with `rpcFail`, `d1Fail`, `crash` and `skipEviction`. **Cost.** Costs are
 partially ordered, so a state has no single best cost. What is kept per
 state is a Pareto frontier of arrivals (D13), and every comparison of costs
 walks their keys. DESIGN.md §3.
+
+### D31. Steps are a cost key, counted for every event
+
+Every edge costs one `__steps__`, in the same vector as the model's own
+keys and `__deviations__`. It is always counted; there is no opting out.
+
+**Why.** The maintainer's decision, 2026-09-30, out of the argument in D10.
+Three things follow from the one change. A budget can bound the length of a
+run, so a long or endless baseline no longer has to be walked to its end
+before one deviation is tried. The cache holds the trade between steps and
+everything else: a state reached in fewer steps by more deviations is an
+arrival of its own, so "the fewest deviations within ten steps" is a
+projection of what is already there. And a run is bounded without the model
+returning `[]` after so many steps, which made every cut-off an end that
+`terminalInvariant` had to expect (D7). The search also lost a concept:
+depth was a field carried beside the cost, with an argument from the order
+of exploration that the first arrival was the shallowest (D12).
+
+**Rejected:**
+
+- *Depth as a field beside the cost*, the earlier form. Dominance ignored
+  it, so a shorter way to a state already reached more cheaply was
+  discarded at that state, and with it every violation it led to. On a
+  baseline of 40 steps to a failing state, with a one-deviation shortcut to
+  it, one error edge was recorded, and the two-step violation was unknown
+  to the cache at any budget. Test: `steps: the length of a run is a cost`
+  › "a shorter way by more deviations is an arrival of its own, beside the
+  cheaper and longer one".
+- *Reporting the shortest violation of each deviation budget from the error
+  edges already held*, proposed in the same discussion. For the reason just
+  given, the cache did not hold them.
+- *A key the model lists on every event.* It works, and is how the idea was
+  first measured, but the ranking then counts steps among the model's other
+  cost (D10).
+- *Opting in.* Not per budget: a step budget is sound only if dominance
+  counts steps, since a kept cache may hold a cheaper arrival beyond the
+  current step allowance. Per cache it would keep two searches, and the
+  oracle would have to cover both.
+
+**Evidence.** The oracle (D25) has steps in its costs and bounds them in
+half its budgets. Ten one-line bugs seeded into the change, among them
+dominance ignoring steps, a step budget dropping edges where it should
+defer them, and steps counted among the other cost, each fail it. 160,000
+random models pass.
+
+**Cost.** Not one `applyEvent` call more; the cost is in what the cache
+keeps and walks. Against the search before it:
+
+| Model | Arrivals | Time |
+| --- | --- | --- |
+| dining philosophers, 7, explored to exhaustion | 1,775 → 3,101 | 25 → 33 ms |
+| dining philosophers, 8, explored to exhaustion | 4,922 → 8,566 | 70 → 102 ms |
+| a 50,000-step run, one deviation | unchanged | 404 → 606 ms |
+| a decision tree 14 deep, no state reached twice | unchanged | 95 → 107 ms |
+
+Where states merge there are more arrivals to record and to traverse;
+where they do not, each edge still makes a cost vector of its own. A run is
+exhaustive a deviation budget later (D17). `violation.cost` and `costs`
+carry the key, which breaks a caller that compares them whole: released as
+D24 says. DESIGN.md §3.
+
+### D32. A budget bounds the keys it names; a missing allowance is no limit
+
+`{}` allows everything. `{ crash: 1 }` allows one crash, and any amount of
+anything else, deviations and steps included.
+
+**Why.** The maintainer's decision, 2026-09-30. Steps (D31) had to default
+to no limit, or every budget written before them would have explored
+nothing. One rule for every key was chosen over an exception for one: a
+budget says what it bounds. **Rejected:** zero as the default, the earlier
+rule, with `__steps__` alone unlimited when missing. **Cost.** What a
+budget means has changed, which is breaking. `explore(cache, {})` explored
+the baseline with none of any key, and now explores everything.
+`exploreIteratively` without a `baseBudget` allowed none of the model's
+keys, and now allows any amount. And a key misspelt in a budget bounds
+nothing, silently, where it used to leave the real key at zero. Cost and
+budget read a missing key differently, zero and no limit, so they are
+compared by two functions. Test: `budgets and deviations` › "a key a budget
+leaves out is not limited: the empty budget allows everything". DESIGN.md
+§3.2.
 
 ### D5. A model says what is wrong in three places (#12, #13)
 
@@ -120,7 +218,8 @@ asked once. DESIGN.md §2.4.
 A state is terminal when `getEvents` returns `[]`. A state whose events are
 all beyond the budget is not, and is not shown to `terminalInvariant`. A
 model that bounds its runs by returning `[]` after so many steps makes
-those cut-offs ends, and its `terminalInvariant` has to expect them.
+those cut-offs ends, and its `terminalInvariant` has to expect them; a
+`__steps__` allowance bounds them without making ends (D31).
 
 **Why.** The check's result is kept per state (D1), and an end that
 depended on the budget could not be. **Rejected:** checking the states a
@@ -172,16 +271,30 @@ costs 30 µs.
 ### D10. "Shortest" is lexicographic: deviations, then other cost, then steps
 
 The violation reported is the one with the fewest deviations; among those,
-the smallest sum of the other cost keys; among those, the fewest steps.
+the smallest sum of the model's own cost keys; among those, the fewest
+steps.
 
 **Why.** Fewest deviations first is the point of the library: the failure
 that strays least from the expected schedule is the least surprising one,
-and the counterexample a reader wants. **Not recorded:** why the other keys
-are compared by their sum, and not key by key, and why steps come last.
-**Cost.** The promise holds for a run that completed. A run cut short
-guarantees only the fewest deviations, since a violation with less other
-cost may lie where it did not reach; the README's result table says so
-(#17). Which violation is reported is API (D23). DESIGN.md §6.2.
+and the counterexample a reader wants. A failure with no deviation happens
+on every normal run, and what describes a trace is its deviations, not its
+default steps. It is also the order the search can afford. **Rejected:**
+fewest steps first, argued on 2026-09-30. It is often the better trace to
+debug: where the preference order is arbitrary, where the default prefix is
+long, and where both kinds of violation exist and only the first is
+reported. But as a search order it is depth bounding, whose cost is *C^d*
+for *C* choices at depth *d*, and deep errors stay out of reach (the
+delay-bounding paper's argument against it; in kilde's experiment a bug
+twelve decisions deep and two deviations in was found in 115 runs). What
+the argument did expose is met otherwise: steps are a cost key (D31), so
+the cache holds the trade-off between steps and deviations, and a step
+allowance picks the short trace, or keeps a long baseline from standing in
+the way. **Not recorded:** why the model's own keys are compared by their
+sum, and not key by key. **Cost.** The promise holds for a run that
+completed. A run cut short guarantees only the fewest deviations,
+since a violation with less other cost may lie where it did not reach; the
+README's result table says so (#17). Which violation is reported is API
+(D23). DESIGN.md §6.2.
 
 ### D11. Which of several tied violations is reported is unspecified (#17)
 
@@ -197,23 +310,25 @@ with the order of exploration being free. Test: `regressions` › "of
 violations that tie, either may be reported, and the two searches may
 differ". DESIGN.md §6.2.
 
-### D12. Deviation levels in ascending order, and each level's depths in turn (#17)
+### D12. Deviation levels in ascending order, and each level's steps in turn (#17)
 
-Pending edges are kept by the successor's deviation count, then by its
-depth. A call drains the levels from the lowest, and each level from the
-shallowest depth, stepping a cursor.
+Pending edges are kept by the successor's deviations, then by its steps. A
+call drains the levels from the lowest, and each level from the fewest
+steps, stepping a cursor.
 
 **Why.** Traversing an edge at level *d* queues edges at level *d* or
-higher, one step deeper, so lower levels are never refilled and the first
-arrival at a (state, cost) pair is the shallowest for that cost. Stored
-predecessors then rebuild a path with the fewest steps, with no priority
-queue. **Rejected:** searching a level for its lowest depth each time, the
-earlier form. It is quadratic in the depth of a level, and a long run with
-an alternative at every step, the usual shape of a simulation, fills one
-level with a depth per step: a 50,000-step run took 2.6 s and takes 185 ms.
-The cursor relies on a level only growing deeper within a call; if that
-were ever broken, the loop throws an internal error instead of spinning.
-DESIGN.md §5.
+higher, one step further, so lower levels are never refilled, and a call
+with *d* deviations touches nothing above them: that is what makes
+deepening cost only what is new. Until steps became a cost key (D31) the
+order also carried the promise of the shortest path, the first arrival at a
+(state, cost) pair being the shallowest; now a longer way at the same cost
+is simply dominated. **Rejected:** searching a level for its lowest depth
+each time, the earlier form. It is quadratic in the depth of a level, and a
+long run with an alternative at every step, the usual shape of a
+simulation, fills one level with a depth per step: a 50,000-step run took
+2.6 s and took 185 ms after. The cursor relies on a level only growing
+deeper within a call; if that were ever broken, the loop throws an internal
+error instead of spinning. DESIGN.md §5.
 
 ### D13. Arrivals are kept per (state, cost); a dominated one is not recorded, and a recorded one is never removed
 
@@ -226,13 +341,15 @@ budget.
 from the cheaper one, at no more cost. Keeping recorded arrivals keeps
 their predecessors stable, and paths are rebuilt from predecessors.
 **Cost.** `reached` can hold arrivals that the projection discards, and the
-projection compares each state's arrivals pairwise. DESIGN.md §3.3, §6.1.
+projection compares each state's arrivals pairwise. With steps among the
+keys (D31) a state has an arrival for each trade of steps against the
+rest, where it used to have one per cost. DESIGN.md §3.3, §6.1.
 
 ### D14. An unaffordable edge is deferred, not dropped, and an unbounded budget ends where the levels do (#15)
 
-An edge beyond the budget in a key other than deviations moves to
-`deferred`, and every later call re-checks it against its own budget. A
-call visits only the deviation levels that have edges.
+An edge beyond the budget in a key other than deviations, steps included,
+moves to `deferred`, and every later call re-checks it against its own
+budget. A call visits only the deviation levels that have edges.
 
 **Why.** The cache is independent of budgets (D16), so an edge one call
 cannot afford must still be there for a richer one. Test: `regressions` ›
@@ -282,8 +399,12 @@ exhaustiveness. On a cache explored earlier at a larger budget, a second
 true`, although the first run had found a violation. The cache now keeps
 the componentwise maximum of every cost it records, and a result is
 exhaustive only when its budget covers that. `cache.exhaustive` keeps its
-meaning: the cache holds everything, explored at whatever budgets. Tests:
-`exhaustive: what a result without a violation proves`. DESIGN.md §8.
+meaning: the cache holds everything, explored at whatever budgets.
+**Cost.** Everything is every arrival, so since D31 a run is exhaustive
+only once the shorter, dearer ways to known states are explored too. On the
+dining philosophers that is one deviation budget later than before, with
+no `applyEvent` call in it. Tests: `exhaustive: what a result without a
+violation proves`. DESIGN.md §8.
 
 ### D18. However a call ends, the cache is consistent (#15)
 
@@ -314,10 +435,25 @@ edges left needed more of the base budget. **Cost.** For a run that only a
 larger `baseBudget` could take further, `maxDeviationsReached` is where it
 stopped, not `maxDeviations`. DESIGN.md §7.
 
+### D33. `exploreIteratively` deepens deviations only
+
+A bound on steps, or on any other key, is an allowance in `baseBudget`.
+Each deviation budget is explored within it.
+
+**Why.** The maintainer's decision, 2026-09-30: the key first (D31), a
+policy later. The cache makes any sequence of budgets cheap, so deepening
+along two keys is a loop a caller can write on `explore`, and which such
+loop deserves to be built in is not known yet. **Cost.** A result within a
+step allowance has cleared two bounds, of which one was deepened: "no
+violation within 50 steps and 3 deviations". Test: `steps: the length of a
+run is a cost` › "deepening within a step allowance tries a deviation
+before the baseline is walked to its end". DESIGN.md §7.
+
 ### D20. A violation carries its whole cost, and each step its index (#9)
 
 `ViolationPath.cost` is the cost of the whole path, the failing event
-included. `ViolationStep.index` is the event's position in `getEvents`.
+included, and so its `__steps__` is the number of steps.
+`ViolationStep.index` is the event's position in `getEvents`.
 
 **Why.** A step's `cost` is the cost before it, so the charge for the
 failing event, often the deviation that matters, appeared nowhere, and a
@@ -334,7 +470,7 @@ event listed twice is reported at the index it was taken at". DESIGN.md
 
 An allowance, `maxEdges` and `timeoutMs` must be a number, zero or more;
 `maxDeviations` must also be whole. Anything else is a `RangeError`.
-`Infinity` is the way to say no limit.
+`Infinity` says no limit, as leaving a key out of a budget does (D32).
 
 **Why.** `maxEdges: NaN` was no cap at all, and `NaN` is what
 `Number(process.env.X)` gives with X unset. `NaN` for a cost key was an
@@ -507,10 +643,16 @@ every name is provisional.
 - An `optional` mark on an event, so that `terminalInvariant` also runs
   where every event is optional, if a fault offered alone should be
   supported (D7).
+- A deviation charge the model sets per event: the index, for delay
+  bounding without the encoding; zero, for a model with no baseline (D3).
+- A deepening policy over steps and deviations together, and a result that
+  reports the violations that trade one for the other (D33, D10).
 
 **Undecided, the maintainer's call.** Whether to narrow the valsem peer
 range to `<0.1`, and whether `test (valsem floor)` becomes a required check
 (D26).
 
-**Reasons to record.** Why any departure costs one deviation (D3); why the
-other cost keys are compared by their sum, and steps last (D10).
+**Reasons to record.** Why a deviation is charged whether or not the
+index-0 event is affordable (D3); why the model's own cost keys are
+compared by their sum (D10). D3's case for the flat charge was argued on
+2026-09-30, not recorded when it was built: confirm it or replace it.

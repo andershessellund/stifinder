@@ -122,7 +122,8 @@ D5, D6.
 
 A state is terminal when `getEvents` returns `[]` for it, and only then. A
 state whose events are all beyond the budget has events, and is not shown
-to `terminalInvariant`. It follows that a model must not offer a fault as a
+to `terminalInvariant`; so a step allowance (§3.2) cuts a run short without
+making an end of it. It follows that a model must not offer a fault as a
 state's only event: a run may end there, and nothing checks it. A fault
 goes beside a free event (D7).
 
@@ -136,20 +137,32 @@ A cost is a vector of non-negative counts by key, held as an interned
 `ValueMap<string, number>`, so equal vectors are `===`. A missing key is
 zero.
 
-An edge costs one unit for each occurrence of a key in its event's `cost`
-(a key listed twice costs two), plus one unit of the reserved key
-`__deviations__` when the event is not at index 0 of `getEvents(state)`.
-The deviation is charged by index alone: whichever alternative is taken,
-and whether or not the index-0 event is affordable (D3). An event may not
-list `__deviations__` itself; `getEvents` results that do are rejected.
+An edge costs:
 
-The cost of a path is the sum of its edges. It is a property of the path,
-not of the budget it was found under.
+- one unit of the reserved key `__steps__`, always (D31);
+- one unit for each occurrence of a key in its event's `cost` (a key listed
+  twice costs two);
+- one unit of the reserved key `__deviations__` when the event is not at
+  index 0 of `getEvents(state)`. The deviation is charged by index alone:
+  whichever alternative is taken, and whether or not the index-0 event is
+  affordable (D3).
+
+An event may not list a reserved key itself; `getEvents` results that do
+are rejected.
+
+The cost of a path is the sum of its edges, so its `__steps__` is its
+length. Cost is a property of the path, not of the budget it was found
+under.
 
 ### 3.2 Budgets
 
-A budget is a cost vector read as allowances. A path is within a budget
-when its cost is at most the budget in every key. `Infinity` is no limit.
+A budget is a vector of allowances by key. A path is within a budget when
+its cost is at most the allowance of every key the budget names. A key it
+does not name is not limited, and neither is one given `Infinity`: the
+empty budget allows everything (D32). Cost and budget thus read a missing
+key differently, as zero and as no limit, and are compared by two
+functions: one cost against another, and a cost against a budget.
+
 An allowance, `maxEdges` and `timeoutMs` must each be a number, zero or
 more, and `maxDeviations` must also be whole; anything else is a
 `RangeError` (D21).
@@ -160,7 +173,13 @@ Costs are partially ordered, componentwise. A state can be reached at
 several costs of which none is at most another, so what is kept per state
 is a set of arrivals, one per cost (§4). An arrival at a cost that is at
 least one already recorded for the state is *dominated*: every path on
-from it exists from the cheaper arrival too, at no more cost. Why: D4, D13.
+from it exists from the cheaper arrival too, at no more cost.
+
+Steps are a key in that order like any other. A way to a state that is
+shorter but takes more deviations, or more of a fault, is not dominated by
+the longer and cheaper one, and both are kept. A way round a cycle is
+dominated by where it started: it costs steps and gains nothing, so no
+cycle is walked twice. Why: D4, D13, D31.
 
 ---
 
@@ -175,12 +194,12 @@ any sequence of budgets (D16).
 | `events` | state → its events, with an omitted `cost` filled in as `[]` |
 | `apply` | state → event → the edge's result: `{ to }`, or `{ error, badState? }` |
 | `invariants` | state → the failure of its checks, or `null` |
-| `reached` | state → cost → arrival: its depth, and the predecessor edge |
+| `reached` | state → cost → arrival: the predecessor edge |
 | `initialError` | the initial state's failure, if it fails a check |
-| `errorEdges` | every error edge found: from, cost before, event, index, total cost, depth, error, `badState` |
+| `errorEdges` | every error edge found: from, cost before, event, index, total cost, error, `badState` |
 | `costCeiling` | the componentwise maximum of every cost recorded |
-| `pending` | edges not yet traversed, by the successor's deviation count, then its depth |
-| `deferred` | edges found unaffordable in a key other than deviations |
+| `pending` | edges not yet traversed, by the successor's deviations, then its steps |
+| `deferred` | edges found beyond a budget in a key other than deviations, steps included |
 
 All of these are `@internal`. The API of a cache is its `model`, the
 canonical `initialState`, `exhaustive`, `statesExplored`, and the read-only
@@ -205,33 +224,34 @@ flight is rejected.
 One budget-bounded, breadth-first expansion of the edge frontier.
 
 1. **Seed**, on a fresh cache. Check the initial state; if it passes, ask
-   for its events. Record its arrival at the empty cost and depth 0, keep
-   any failure as `initialError`, and queue one edge per event.
+   for its events. Record its arrival at the empty cost, keep any failure
+   as `initialError`, and queue one edge per event.
 2. **Bring back** every deferred edge this budget can afford.
 3. **Drain** the deviation levels present, from the lowest, up to the
    budget's deviations. Only levels that exist are visited, so an unbounded
-   budget ends where the levels do (D14). Within a level, depths are taken
-   in turn from the shallowest (D12). For each edge:
+   budget ends where the levels do (D14). Within a level, edges are taken
+   by their steps, in turn from the fewest (D12). For each edge:
    - past the deadline: stop, `timedOut`;
-   - beyond the budget in another key: defer it;
+   - beyond the budget in another key, steps among them: defer it;
    - at the edge limit, and not already computed: stop;
    - apply it (§2.4). An error is recorded as an error edge, with the cost
-     and depth of the path that ends in it;
+     of the path that ends in it;
    - an arrival dominated by one already recorded is skipped;
    - otherwise ask for the successor's events, record the arrival with its
-     predecessor, and queue one edge per event, one step deeper.
+     predecessor, and queue one edge per event, one step further.
 4. **Report**: `completed` (no limit was hit), `timedOut`, `exhaustive`
    (§8), and the edges computed by this call and in total.
 
-An edge's cost and depth are its successor's: the cost and depth of the
-arrival it came from, plus the edge. `maxEdges` counts `applyEvent` calls,
-so an edge the cache already holds is free and never stops a run.
+An edge's cost is its successor's: the cost of the arrival it came from,
+plus the edge. `maxEdges` counts `applyEvent` calls, so an edge the cache
+already holds is free and never stops a run.
 
-**Order gives minimality.** Traversing an edge at deviation level *d*
-queues edges at level *d* or higher, one step deeper. Levels run in
-ascending order and each level in ascending depth, so lower levels are
-never refilled, and the first arrival at a (state, cost) pair is the
-shallowest there is for that cost.
+**Order.** Traversing an edge at deviation level *d* queues edges at level
+*d* or higher, one step further. Levels run in ascending order and each
+level in ascending steps, so lower levels are never refilled, and a call
+with *d* deviations touches nothing above them. That a path is the
+shortest for what else it costs needs no argument from order: its steps
+are part of its cost, and a longer way at the same cost is dominated.
 
 **However a call ends, the cache is consistent** (D18). Whatever can throw,
 a callback or valsem rejecting a state, happens before an arrival is
@@ -249,7 +269,8 @@ same throw after a throw.
 A read-only projection of the cache onto a budget.
 
 - **`costs`**: each state reached within the budget, with its
-  Pareto-minimal arrival costs.
+  Pareto-minimal arrival costs. Steps count: a state reached in fewer steps
+  at more of something else has both costs.
 - **`transitions`**: the computed edges out of each of those states, each
   with its event, its original `index` and its cost keys. A transition's
   `to` can be missing from `costs`: the edge was computed from an arrival
@@ -259,12 +280,17 @@ A read-only projection of the cache onto a budget.
 ### 6.2 Which violation
 
 "Shortest" is lexicographic: fewest deviations, then the smallest sum of
-the other cost keys, then the fewest steps (D10). A failing initial state
-comes before everything: it costs nothing and takes no steps. Otherwise the
-best error edge whose total cost is within the budget is picked, and its
-path is rebuilt by walking stored predecessors back from the arrival the
-edge left. Of several violations that tie on all three, which one is
-reported follows the order of exploration and is not specified (D11).
+the model's own cost keys, then the fewest steps (D10). Which of these a
+caller cares about is a matter of budget: at `{ __steps__: 10 }` the
+violation reported is the one with the fewest deviations among those of at
+most ten steps.
+
+A failing initial state comes before everything: it costs nothing and takes
+no steps. Otherwise the best error edge whose total cost is within the
+budget is picked, and its path is rebuilt by walking stored predecessors
+back from the arrival the edge left. Of several violations that tie on all
+three, which one is reported follows the order of exploration and is not
+specified (D11).
 
 A violation is `{ steps, cost, error, badState? }`. Each step is
 `{ state, cost, event, index }`: the event applied at `state`, its position
@@ -286,7 +312,12 @@ at more cost.
 
 `exploreIteratively(cacheOrModel, options)` calls `explore` with deviation
 budgets 0, 1, 2, … on top of `baseBudget`, whose own deviation allowance is
-ignored. `maxEdges` and `timeoutMs` bound the whole run. It stops when:
+ignored. The base budget bounds the keys it names and no others; by default
+it names none. Deviations are the only key deepened (D33): a bound on the
+length of a run is a `__steps__` allowance in the base budget, under which
+each deviation budget covers the runs that short, and a long baseline does
+not have to be walked to its end before a deviation is tried. `maxEdges`
+and `timeoutMs` bound the whole run. It stops when:
 
 - a call did not complete;
 - the budget just explored has a violation (unless `stopOnViolation:
@@ -324,6 +355,11 @@ reach has been explored, and the projection at this budget shows all of it
 
 `completed` alone clears a budget. `cache.exhaustive` alone says the cache
 holds everything, explored at whatever budgets.
+
+"Everything" is every arrival, not every state: a shorter way to a known
+state at more deviations is still to be explored. So a run is exhaustive a
+deviation budget or so after its last new edge; the budgets in between
+compute nothing, and only traverse what the cache holds (D31).
 
 ---
 
@@ -367,7 +403,8 @@ job that builds nothing; CONTRIBUTING.md and SECURITY.md describe both.
    only proof; `completed` clears a budget.
 2. **Nothing is computed twice.** Every callback result is kept for the
    life of the cache, across budgets.
-3. **Cost belongs to the path**, not to the budget it was found under.
+3. **Cost belongs to the path**, not to the budget it was found under, and
+   a path's length is part of its cost.
 4. **The violation reported is the least** by deviations, then other cost,
    then steps, within the budget of a run that completed. Ties are
    unspecified.
@@ -376,6 +413,6 @@ job that builds nothing; CONTRIBUTING.md and SECURITY.md describe both.
    limit, or rejected by a throw.
 7. **States and events in results are canonical.** Equal means `===`.
 8. **Input that cannot be read is an error**, never a limit read some other
-   way.
+   way. A budget bounds what it names, and nothing else.
 9. **The order of exploration is not API**, beyond what the reported
    violation depends on.
