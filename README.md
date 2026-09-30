@@ -57,7 +57,7 @@ promise.
 - **`getEvents(state)`** returns the events worth considering from a state,
   in *preference order*. Index 0 is the baseline, the thing that "should"
   happen next. Every other index costs one unit of the implicit
-  `__deviations__` budget.
+  `__deviations__` key. Every event, at any index, costs one `__steps__`.
 - **`applyEvent(state, event)`** returns `{ to: nextState }` or
   `{ error }`. Throwing counts as an error.
 - **`invariant(state)`**, optional, returns `{ error }` for a state that must
@@ -79,7 +79,9 @@ deadlock. For the last two the violation carries the state, as `badState`.
 An end is a property of the model, not of a budget: a state whose events are
 all unaffordable is not terminal, and is not shown to `terminalInvariant`. A
 model that bounds its runs by returning `[]` after so many steps does make
-those states terminal, and its `terminalInvariant` has to expect them.
+those states terminal, and its `terminalInvariant` has to expect them. A
+`__steps__` allowance bounds them without that: where a budget cuts a run
+short is not an end.
 
 For the same reason, offer a fault beside a free event, never as a state's
 only event. A fault never has to happen, so a run can end where only faults
@@ -89,10 +91,15 @@ leads is an end.
 
 Each event may also list explicit **cost keys**
 (`{ event, cost: ['crash', 'retry'] }`); leaving `cost` out means none. A key
-listed twice costs two units. A budget is a vector of per-key
-allowances, and exploration only follows paths whose accumulated cost stays
-within it. Deviation counting is automatic; other keys are yours to define.
-Listing `__deviations__` as a cost key is an error.
+listed twice costs two units. Two keys are counted for you, and listing
+either is an error: `__deviations__`, and `__steps__`, the length of the
+path.
+
+A **budget** gives an allowance per key, and exploration only follows paths
+whose accumulated cost stays within it. A key the budget leaves out is not
+limited. So `{}` allows everything, `{ crash: 1 }` allows one crash and any
+amount of anything else, and `{ __steps__: 50 }` allows runs of up to fifty
+steps.
 
 Two requirements, both consequences of caching:
 
@@ -136,11 +143,20 @@ holds.
 ## Which violation is reported
 
 "Shortest" is lexicographic: fewest deviations first, then the smallest
-total of the other cost keys, then the fewest steps. Exploration runs the
-deviation levels in ascending order and each level in ascending depth, so
-the first arrival at a (state, cost) pair is the shallowest one, and the
-trace reconstructed from stored predecessors has the minimum number of
-steps for its cost.
+total of your own cost keys, then the fewest steps.
+
+To the search, steps are a cost like any other. A state reached in fewer
+steps by more deviations is kept beside the cheaper, longer way to it, so
+the cache holds the trade-off, and a budget picks from it:
+`analyzeCache(cache, { __steps__: 10 })` reports the violation with the
+fewest deviations among those at most ten steps long.
+
+A step allowance is also what keeps a long baseline from standing in the
+way. Deviation budget 0 is the whole expected run; if that run is long, or
+never ends, no deviation is tried until it is walked to its end. With
+`exploreIteratively(model, { baseBudget: { __steps__: 50 } })` each
+deviation budget covers the runs of up to fifty steps, and the result is
+`exhaustive` only if nothing reaches further.
 
 Violations can tie on all three. Which of them is reported is not
 specified: it follows the order of exploration, which may change between
@@ -245,7 +261,8 @@ six.
 - **`shortestViolation(analysis)`** recomputes the shortest violation path
   from the transition table alone. On an unedited analysis it finds one of
   the same rank as `analysis.violation`, which is much cheaper: the same
-  cost and number of steps, though of several that tie it may pick another.
+  deviations, total of other keys and number of steps, though of several
+  that tie it may pick another.
 
 A violation is `{ steps, cost, error, badState? }`, where each step is
 `{ state, cost, event, index }`: the event applied at `state`, its position
@@ -265,7 +282,7 @@ whichever it is.
 | --- | --- | --- | --- |
 | `maxEdges` | all | `100_000` | cap on `applyEvent` calls per `explore` call, or per `exploreIteratively` run; cache hits are free |
 | `timeoutMs` | all | none | wall-clock cap per `explore` call, or per `exploreIteratively` run |
-| `baseBudget` | iterative | `{}` | non-deviation allowances |
+| `baseBudget` | iterative | `{}` | allowances for every key but deviations; a key left out is not limited |
 | `maxDeviations` | iterative | `100` | deepest deviation budget tried; `Infinity` for no cap |
 | `stopOnViolation` | iterative | `true` | stop at the first failing budget |
 
@@ -278,8 +295,9 @@ Budgets are accepted as plain objects or as canonical `ValueMap<string,
 number>` values (`BudgetVector`); `toBudget` normalizes either form.
 
 Every allowance in a budget, and `maxEdges` and `timeoutMs`, must be a
-number, zero or more, with `Infinity` for no limit; `maxDeviations` must also
-be whole. Anything else, `NaN` included, is a `RangeError`.
+number, zero or more, with `Infinity` for no limit (in a budget, the same as
+leaving the key out); `maxDeviations` must also be whole. Anything else,
+`NaN` included, is a `RangeError`.
 
 ## Requirements
 

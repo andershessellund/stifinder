@@ -17,22 +17,28 @@ import { HashMap, ValueMap, intern } from 'valsem';
 
 /**
  * A cost vector is an interned `ValueMap<string, number>`: per-key unit
- * counts, missing keys meaning zero. Two structurally-equal vectors are
- * reference-identical (`===`) and carry a precomputed `[hashCode]`,
- * making cache keying and equality cheap.
+ * counts, missing keys meaning zero. Besides a model's own keys it counts
+ * `__steps__`, one per event, and `__deviations__`. Two structurally-equal
+ * vectors are reference-identical (`===`) and carry a precomputed
+ * `[hashCode]`, making cache keying and equality cheap.
  */
 export type CostVector = ValueMap<string, number>;
 
-/** A budget is a cost vector read as per-key allowances. */
-export type BudgetVector = CostVector;
+/**
+ * A budget is a vector of per-key allowances. Here a missing key is no
+ * limit: the empty budget allows everything, and a budget bounds only the
+ * keys it names.
+ */
+export type BudgetVector = ValueMap<string, number>;
 
 /** Public API input form: accepts either a plain object or a `BudgetVector`. */
 export type BudgetLike = BudgetVector | Readonly<Record<string, number>>;
 
 /**
  * Normalize an API-boundary budget input to a canonical `BudgetVector`.
- * Every allowance must be a number, zero or more (`Infinity` for no limit);
- * anything else is a `RangeError`, not a limit read some other way.
+ * Every allowance must be a number, zero or more (`Infinity`, like leaving
+ * the key out, for no limit); anything else is a `RangeError`, not a limit
+ * read some other way.
  */
 export function toBudget(b: BudgetLike): BudgetVector {
   const budget = b instanceof ValueMap ? b : ValueMap.fromObject<number>(b);
@@ -60,8 +66,11 @@ function checkLimits(options: ExploreOptions | IterativeOptions | undefined): vo
   }
 }
 
-/** Reserved budget key counting non-preferred event choices along a path. */
+/** Reserved cost key counting non-preferred event choices along a path. */
 export const DEVIATIONS_KEY = '__deviations__';
+
+/** Reserved cost key counting the steps of a path: every event costs one. */
+export const STEPS_KEY = '__steps__';
 
 /** What a model's `applyEvent` returns: the successor state, or an error. */
 export type ApplyResult<State> = { to: State } | { error: unknown };
@@ -83,7 +92,8 @@ export interface EventDescriptor<Event> {
   /**
    * Budget keys this event consumes, one unit per occurrence (a key listed
    * twice costs two units). Omitted means none. Must not include
-   * `__deviations__`; the explorer throws if it does.
+   * `__deviations__` or `__steps__`, which the explorer counts itself; it
+   * throws if it does.
    */
   cost?: readonly string[];
 }
@@ -99,7 +109,7 @@ export interface Model<State, Event> {
    * Return the events to consider from `state`, in preference order
    * (most-preferred first). The event at index 0 is always the
    * deviation-zero baseline; every other event charges one unit of the
-   * implicit `__deviations__` budget.
+   * implicit `__deviations__` key. Every event charges one `__steps__`.
    *
    * Must be a pure function of `state`: results are memoized for the
    * lifetime of the cache.
@@ -155,7 +165,7 @@ export type BaseTransition<State, Event> =
  *  had been reached at accumulated cost `cost`. */
 export interface ViolationStep<State, Event> {
   state: State;
-  /** Cost accumulated from the initial state to `state` (deviations included). */
+  /** Cost accumulated from the initial state to `state` (steps and deviations included). */
   cost: CostVector;
   event: Event;
   /** Position of `event` in `getEvents(state)`. 0 is the baseline; any
@@ -210,8 +220,9 @@ export interface CacheAnalysis<State, Event> {
   /** The budget the projection was built for. */
   budget: BudgetVector;
   /** Pareto-minimum cost-to-reach vectors per reachable state, filtered to
-   *  costs ≤ `budget`. Cost is intrinsic to the path: the sum of edge
-   *  costs (event cost + 1 deviation per non-index-0 event). */
+   *  costs within `budget`. Cost is intrinsic to the path: the sum of edge
+   *  costs (event cost + 1 step + 1 deviation per non-index-0 event). So a
+   *  state reached in fewer steps by more deviations has both costs here. */
   costs: HashMap<State, CostVector[]>;
   /** Computed transitions out of each state in `costs`. A transition's
    *  `to` state may itself be absent from `costs` when the edge was
@@ -243,7 +254,10 @@ export interface ExploreOptions {
 }
 
 export interface IterativeOptions {
-  /** Base budget (deviation key, if present, is overridden per iteration). Default: {}. */
+  /** Allowances for every key but deviations, which each iteration sets
+   *  (one given here is ignored). A key it leaves out is not limited, so
+   *  the default, `{}`, bounds nothing: `{ __steps__: 50 }` bounds the
+   *  length of a run. */
   baseBudget?: BudgetLike;
   /** Deepest deviation budget tried. Default: 100. */
   maxDeviations?: number;
@@ -272,22 +286,44 @@ function costSum(c: CostVector): number {
   return sum;
 }
 
-/** True iff `a ≤ b` componentwise (missing keys are 0; values are never negative). */
+/** True iff `a ≤ b` componentwise, both read as costs (missing keys are 0; values are never negative). */
 function costLE(a: CostVector, b: CostVector): boolean {
   if (a === b) return true;
   for (const [k, v] of a.entries()) if (v > (b.get(k) ?? 0)) return false;
   return true;
 }
 
+/** True iff `cost` is within `budget`: at most the allowance of each key the
+ *  budget names. A key it does not name is not limited. */
+function withinBudget(cost: CostVector, budget: BudgetVector): boolean {
+  for (const [k, allowance] of budget.entries()) if ((cost.get(k) ?? 0) > allowance) return false;
+  return true;
+}
+
 /**
- * Add an edge's cost (its cost-key array, plus the deviation charge if
- * `chargesDeviation`) to `base`. Returns a new (interned) vector.
+ * The cost one edge further than `base`: one step more, one of each of the
+ * event's cost keys, and a deviation if `chargesDeviation`. Returns a new
+ * (interned) vector.
  */
 function addCost(base: CostVector, costKeys: readonly string[], chargesDeviation: boolean): CostVector {
-  let result = base;
+  let result = base.set(STEPS_KEY, (base.get(STEPS_KEY) ?? 0) + 1);
   for (const k of costKeys) result = result.set(k, (result.get(k) ?? 0) + 1);
   if (chargesDeviation) result = result.set(DEVIATIONS_KEY, (result.get(DEVIATIONS_KEY) ?? 0) + 1);
   return result;
+}
+
+/** How a violation of this cost ranks: by deviations, then by the other cost
+ *  keys together, then by steps. */
+type Rank = readonly [deviations: number, other: number, steps: number];
+
+function rankOf(cost: CostVector): Rank {
+  const deviations = cost.get(DEVIATIONS_KEY) ?? 0;
+  const steps = cost.get(STEPS_KEY) ?? 0;
+  return [deviations, costSum(cost) - deviations - steps, steps];
+}
+
+function rankLess(a: Rank, b: Rank): boolean {
+  return a[0] !== b[0] ? a[0] < b[0] : a[1] !== b[1] ? a[1] < b[1] : a[2] < b[2];
 }
 
 /** True iff one of `arrivals` costs `≤ cost`: an arrival at `cost` would add nothing. */
@@ -318,8 +354,6 @@ export interface PredecessorEntry<State, Event> {
 
 /** @internal One arrival at a (state, cost) pair. */
 export interface CostEntry<State, Event> {
-  /** Number of steps from the initial state (minimum for this exact cost). */
-  depth: number;
   /** `null` for the initial state's cost-{} entry. */
   pred: PredecessorEntry<State, Event> | null;
 }
@@ -333,18 +367,15 @@ export interface ErrorEdgeEntry<State, Event> {
   /** Position of `event` in `getEvents(from)`. */
   index: number;
   /** Total cost to traverse this edge from the initial state
-   *  (= `fromCost` + edge cost + optional deviation). */
+   *  (= `fromCost` + a step + edge cost + optional deviation). */
   totalCost: CostVector;
-  /** Number of steps in the violation path ending with this edge. */
-  depth: number;
   error: unknown;
   /** The state `event` led to, when the error is that state failing the invariant. */
   badState?: State;
 }
 
 /** @internal Pending traversal of a single (state, cost, event) edge. `cost`
- *  and `depth` are the **successor's**: `addCost(fromCost, ev.cost, index !== 0)`
- *  and the from-entry's depth + 1. */
+ *  is the **successor's**: `addCost(fromCost, ev.cost, index !== 0)`. */
 export interface PendingEdge<State, Event> {
   from: State;
   fromCost: CostVector;
@@ -352,7 +383,6 @@ export interface PendingEdge<State, Event> {
   /** Position of `event` in `getEvents(from)`. */
   index: number;
   cost: CostVector;
-  depth: number;
 }
 
 /**
@@ -379,8 +409,10 @@ export class StateSpaceCache<State, Event> {
 
   // ---- Cost model -------------------------------------------------------
   // For each state, every cost vector at which it has been reached that
-  // was not dominated by an earlier arrival, with the predecessor and
-  // depth of that arrival. Costs are intrinsic to the state space —
+  // was not dominated by an earlier arrival, with the predecessor of that
+  // arrival. Steps are part of the cost, so a state reached in fewer steps
+  // at more of something else is a second arrival, not a dominated one.
+  // Costs are intrinsic to the state space —
   // independent of any exploration budget — so they accumulate across
   // `explore()` calls and are never invalidated. Entries dominated by a
   // later, cheaper arrival are kept so predecessors stay stable; Pareto
@@ -398,13 +430,14 @@ export class StateSpaceCache<State, Event> {
    *  `reached` and in `errorEdges`: a budget at least this large sees the
    *  whole cache. */
   costCeiling: CostVector = EMPTY_COST;
-  /** @internal Edges not yet traversed, bucketed by successor deviation
-   *  count and then by successor depth. Empty (together with `deferred`)
+  /** @internal Edges not yet traversed, bucketed by the successor's
+   *  deviations and then by its steps. Empty (together with `deferred`)
    *  means the entire reachable state space, under any future budget, has
    *  been explored. */
   readonly pending: Map<number, Map<number, PendingEdge<State, Event>[]>> = new Map();
-  /** @internal Pending edges found unaffordable in a non-deviation dimension
-   *  during some previous call. Re-checked against the budget of every call. */
+  /** @internal Pending edges found beyond the budget in a key other than
+   *  deviations, steps included, during some previous call. Re-checked
+   *  against the budget of every call. */
   deferred: PendingEdge<State, Event>[] = [];
 
   /** @internal The counts behind the read-only counters. */
@@ -458,8 +491,10 @@ export class StateSpaceCache<State, Event> {
     if (cached !== undefined) { this.counts.getEventsCacheHits++; return cached; }
     const fresh = (await this.model.getEvents(state)).map((ev) => ({ event: intern(ev.event), cost: ev.cost ?? NO_COST_KEYS }));
     for (const ev of fresh) {
-      if (ev.cost.includes(DEVIATIONS_KEY)) {
-        throw new Error(`stifinder: event cost must not include the reserved key ${DEVIATIONS_KEY}`);
+      for (const reserved of [DEVIATIONS_KEY, STEPS_KEY]) {
+        if (ev.cost.includes(reserved)) {
+          throw new Error(`stifinder: event cost must not include the reserved key ${reserved}`);
+        }
       }
     }
     this.events.set(state, fresh);
@@ -551,12 +586,11 @@ export class StateSpaceCache<State, Event> {
   addCostEntry(
     state: State,
     newCost: CostVector,
-    depth: number,
     pred: PredecessorEntry<State, Event> | null,
   ): CostEntry<State, Event> | null {
     const arrivals = this.reached.get(state);
     if (arrivals !== undefined && isDominated(arrivals, newCost)) return null;
-    const entry: CostEntry<State, Event> = { depth, pred };
+    const entry: CostEntry<State, Event> = { pred };
     this.recordArrival(state, arrivals, newCost, entry);
     return entry;
   }
@@ -587,17 +621,17 @@ export class StateSpaceCache<State, Event> {
 // ---------------------------------------------------------------------------
 // explore() — incremental edge-frontier expansion
 //
-// The cache holds pending edges: (from, fromCost, event, cost, depth)
-// items, each representing one untraversed outgoing edge from a known
-// (state, cost) pair, bucketed by successor deviation count and depth.
+// The cache holds pending edges: (from, fromCost, event, cost) items, each
+// representing one untraversed outgoing edge from a known (state, cost)
+// pair, bucketed by the successor's deviations and then by its steps.
 // Each call drains the deviation levels ≤ the call's budget in ascending
-// order, and within a level the depth buckets in ascending order,
+// order, and within a level the step buckets in ascending order,
 // traversing each edge once and seeding new pending edges for newly
 // reached (state, cost) pairs. Traversing an edge at level d only seeds
 // levels ≥ d, so lower levels never need revisiting. Items in higher
-// levels remain for future, richer-budget calls; items unaffordable in a
-// non-deviation dimension move to `deferred` and are re-checked against
-// every later budget.
+// levels remain for future, richer-budget calls; items beyond the budget
+// in another key, steps included, move to `deferred` and are re-checked
+// against every later budget.
 // ---------------------------------------------------------------------------
 
 export async function explore<State, Event>(
@@ -656,26 +690,20 @@ async function exploreLocked<State, Event>(
       level = new Map();
       cache.pending.set(dev, level);
     }
-    let bucket = level.get(item.depth);
+    const depth = item.cost.get(STEPS_KEY) ?? 0;
+    let bucket = level.get(depth);
     if (bucket === undefined) {
       bucket = [];
-      level.set(item.depth, bucket);
+      level.set(depth, bucket);
     }
     bucket.push(item);
   };
 
-  // Seed one pending edge per event of `state`, reached at `cost` after
-  // `depth` steps.
-  const seedPending = (
-    state: State,
-    cost: CostVector,
-    depth: number,
-    events: readonly Required<EventDescriptor<Event>>[],
-  ): void => {
+  // Seed one pending edge per event of `state`, reached at `cost`.
+  const seedPending = (state: State, cost: CostVector, events: readonly Required<EventDescriptor<Event>>[]): void => {
     for (let k = 0; k < events.length; k++) {
       const ev = events[k]!;
-      const successorCost = addCost(cost, ev.cost, k !== 0);
-      pushPending({ from: state, fromCost: cost, event: ev.event, index: k, cost: successorCost, depth: depth + 1 });
+      pushPending({ from: state, fromCost: cost, event: ev.event, index: k, cost: addCost(cost, ev.cost, k !== 0) });
     }
   };
 
@@ -690,22 +718,22 @@ async function exploreLocked<State, Event>(
     const initialError = await cache.checkInvariant(cache.initialState);
     // As with any state that fails the invariant, nothing is explored beyond it.
     const events = initialError === null ? await cache.getEvents(cache.initialState) : [];
-    cache.addCostEntry(cache.initialState, EMPTY_COST, 0, null);
+    cache.addCostEntry(cache.initialState, EMPTY_COST, null);
     cache.initialError = initialError;
-    seedPending(cache.initialState, EMPTY_COST, 0, events);
+    seedPending(cache.initialState, EMPTY_COST, events);
   }
 
   // Re-inject every deferred edge that this call's budget can afford.
   if (cache.deferred.length > 0) {
     const stillDeferred: PendingEdge<State, Event>[] = [];
     for (const item of cache.deferred) {
-      if (costLE(item.cost, budget)) pushPending(item);
+      if (withinBudget(item.cost, budget)) pushPending(item);
       else stillDeferred.push(item);
     }
     cache.deferred = stillDeferred;
   }
 
-  const budgetDev = budget.get(DEVIATIONS_KEY) ?? 0;
+  const budgetDev = budget.get(DEVIATIONS_KEY) ?? Infinity;
 
   // The lowest deviation level from `from` up with edges waiting, within the
   // budget. Only levels that exist are visited, so even an unbounded
@@ -718,8 +746,8 @@ async function exploreLocked<State, Event>(
     return next;
   };
 
-  // Edges deferred this call (unaffordable in a non-deviation dimension).
-  // Moved to `cache.deferred` once the loop ends, however it ends.
+  // Edges deferred this call (beyond the budget in a key other than
+  // deviations). Moved to `cache.deferred` once the loop ends, however it ends.
   const deferredThisCall: PendingEdge<State, Event>[] = [];
 
   try {
@@ -727,8 +755,9 @@ async function exploreLocked<State, Event>(
       const level = cache.pending.get(dev)!;
       // Within a call a level only grows deeper: deferred edges came back
       // before the loop, and traversing an edge queues edges one step
-      // deeper. So its depths are taken in turn from the shallowest, instead
-      // of each being searched for, which made a long run quadratic.
+      // deeper. So its depths (the successors' steps) are taken in turn from
+      // the shallowest, instead of each being searched for, which made a long
+      // run quadratic.
       let depth = Infinity;
       let deepest = -Infinity;
       for (const d of level.keys()) {
@@ -757,8 +786,8 @@ async function exploreLocked<State, Event>(
             }
 
             // An item at level `dev` has that many deviations; only the
-            // non-deviation dimensions can still be unaffordable.
-            if (!costLE(item.cost, budget)) {
+            // other keys, steps among them, can still be beyond the budget.
+            if (!withinBudget(item.cost, budget)) {
               deferredThisCall.push(item);
               continue;
             }
@@ -776,24 +805,24 @@ async function exploreLocked<State, Event>(
                 event: item.event,
                 index: item.index,
                 totalCost: item.cost,
-                depth: item.depth,
                 error: result.error,
                 ...('badState' in result ? { badState: result.badState } : {}),
               });
               continue;
             }
 
-            // An arrival that is no cheaper than one already recorded adds
-            // nothing. For one that is, the state's events are asked for
-            // before the arrival is recorded.
+            // An arrival that is no cheaper in any key than one already
+            // recorded adds nothing. (Steps are a key: a shorter way to a
+            // state is an arrival of its own, whatever else it costs.) For
+            // one that is, the state's events are asked for before the
+            // arrival is recorded.
             const arrivals = cache.reached.get(result.to);
             if (arrivals !== undefined && isDominated(arrivals, item.cost)) continue;
             const events = await cache.getEvents(result.to);
             cache.recordArrival(result.to, arrivals, item.cost, {
-              depth: item.depth,
               pred: { from: item.from, fromCost: item.fromCost, event: item.event, index: item.index },
             });
-            seedPending(result.to, item.cost, item.depth, events);
+            seedPending(result.to, item.cost, events);
           }
         } finally {
           // What was not traversed goes back: after a limit, and after a throw.
@@ -810,7 +839,7 @@ async function exploreLocked<State, Event>(
   return {
     completed: !timedOut && !stoppedEarly,
     // The whole state space is in the cache, and within this budget.
-    exhaustive: cache.exhaustive && costLE(cache.costCeiling, budget),
+    exhaustive: cache.exhaustive && withinBudget(cache.costCeiling, budget),
     timedOut,
     edgesAddedThisRun: cache.edgesComputed - edgesAtStart,
     edgesComputed: cache.edgesComputed,
@@ -847,10 +876,12 @@ export function analyzeCache<State, Event>(
 // ---------------------------------------------------------------------------
 // exploreIteratively() — convenience wrapper
 //
-// Each iteration deepens the deviation budget. With the incremental
-// cache, iteration d only traverses pending edges at deviation level d
-// (plus anything they newly reach). Stops early when the first violation
-// appears, or when no larger deviation budget could find anything more.
+// Each iteration deepens the deviation budget, within a base budget that
+// bounds whichever other keys it names (`__steps__` for the length of a
+// run). With the incremental cache, iteration d only traverses pending
+// edges at deviation level d (plus anything they newly reach). Stops early
+// when the first violation appears, or when no larger deviation budget
+// could find anything more.
 // ---------------------------------------------------------------------------
 
 export async function exploreIteratively<State, Event>(
@@ -871,9 +902,6 @@ export async function exploreIteratively<State, Event>(
   let lastResult: ExploreResult | null = null;
   let lastBudget: BudgetVector = baseBudget.set(DEVIATIONS_KEY, 0);
   let maxDeviationsReached = -1;
-  // The base budget with any number of deviations: all that an edge held
-  // back by the base budget could ever be given in this run.
-  const anyDeviations: BudgetVector = baseBudget.set(DEVIATIONS_KEY, Infinity);
 
   for (let d = 0; d <= maxDeviations; d++) {
     const budget: BudgetVector = baseBudget.set(DEVIATIONS_KEY, d);
@@ -888,13 +916,14 @@ export async function exploreIteratively<State, Event>(
     // Cheap violation existence check: O(|errorEdges|), no projection.
     if (stopOnViolation && findShortestViolation(cache, budget) !== null) break;
     // No larger deviation budget could find anything more: no edge waits at
-    // a higher level, every edge held back needs more than the base budget,
-    // and nothing in the cache takes more deviations than this budget allows
+    // a higher level, every edge held back needs more than the base budget
+    // (which names no deviations, and so allows any number of them), and
+    // nothing in the cache takes more deviations than this budget allows
     // (a cache explored earlier at a larger budget can hold such things).
     if (
       cache.pending.size === 0 &&
       (cache.costCeiling.get(DEVIATIONS_KEY) ?? 0) <= d &&
-      !cache.deferred.some((item) => costLE(item.cost, anyDeviations))
+      !cache.deferred.some((item) => withinBudget(item.cost, baseBudget))
     ) {
       break;
     }
@@ -926,8 +955,8 @@ export async function exploreOnce<State, Event>(
 // buildCosts — filter cache.reached to states affordable under `budget`
 //
 // Returns each reachable state with its Pareto-minimum set of cost
-// vectors (under the constraint cost ≤ budget). Cached cost entries
-// that are dominated by another entry are pruned at output time.
+// vectors (of those within the budget). Cached cost entries that are
+// dominated by another entry are pruned at output time.
 // ---------------------------------------------------------------------------
 
 function buildCosts<State, Event>(
@@ -938,7 +967,7 @@ function buildCosts<State, Event>(
   for (const [state, arrivals] of cache.reached) {
     const affordable: CostVector[] = [];
     for (const c of arrivals.keys()) {
-      if (costLE(c, budget)) affordable.push(c);
+      if (withinBudget(c, budget)) affordable.push(c);
     }
     if (affordable.length === 0) continue;
 
@@ -993,10 +1022,9 @@ function buildTransitions<State, Event>(
 // findShortestViolation — pick the best error edge from the cache and
 // reconstruct its path via stored predecessors.
 //
-// Ordered by total deviations, then total non-deviation cost, then
-// number of steps — matching `exploreIteratively`'s minimum-deviation
-// semantics. Only error edges whose totalCost is affordable under
-// `budget` are considered.
+// Ordered by deviations, then by the other cost keys together, then by
+// steps — matching `exploreIteratively`'s minimum-deviation semantics.
+// Only error edges whose totalCost is within `budget` are considered.
 // ---------------------------------------------------------------------------
 
 function findShortestViolation<State, Event>(
@@ -1009,19 +1037,12 @@ function findShortestViolation<State, Event>(
   }
 
   let best: ErrorEdgeEntry<State, Event> | null = null;
-  let bestDevs = Infinity;
-  let bestSum = Infinity;
+  let bestRank: Rank | null = null;
   for (const e of cache.errorEdges) {
-    if (!costLE(e.totalCost, budget)) continue;
-    const devs = e.totalCost.get(DEVIATIONS_KEY) ?? 0;
-    const sum = costSum(e.totalCost);
-    if (
-      devs < bestDevs ||
-      (devs === bestDevs && sum < bestSum) ||
-      (devs === bestDevs && sum === bestSum && e.depth < best!.depth)
-    ) {
-      bestDevs = devs;
-      bestSum = sum;
+    if (!withinBudget(e.totalCost, budget)) continue;
+    const rank = rankOf(e.totalCost);
+    if (bestRank === null || rankLess(rank, bestRank)) {
+      bestRank = rank;
       best = e;
     }
   }
@@ -1052,7 +1073,7 @@ function findShortestViolation<State, Event>(
  *
  * Runs a BFS over (state, cost) nodes and is independent of the cache.
  * It uses the same ordering as `analysis.violation` (fewest deviations,
- * then least non-deviation cost, then fewest steps), so on an unedited
+ * then least of the other cost keys, then fewest steps), so on an unedited
  * analysis the two have the same rank; of several violations that tie,
  * they may pick different ones. Prefer `analysis.violation`; it is much
  * cheaper.
@@ -1077,9 +1098,10 @@ function shortestViolationFromTransitions<State, Event>(
   const parents = new HashMap<Node, Parent>();
   const queue: Node[] = [];
   // The costs each state has been reached at. A node reached at a cost no
-  // lower than one already seen for its state is skipped: anything that
-  // follows it also follows the cheaper node, and ranks strictly better
-  // there, so the result is the same. And the search ends at any budget,
+  // lower in any key, steps included, than one already seen for its state
+  // is skipped: anything that follows it also follows the cheaper node, and
+  // ranks no worse there, so the result is the same. And the search ends at
+  // any budget,
   // since with finitely many cost keys a sequence of costs in which none is
   // at least an earlier one is finite (Dickson's lemma).
   const seen = new HashMap<State, CostVector[]>();
@@ -1089,11 +1111,9 @@ function shortestViolationFromTransitions<State, Event>(
   seen.set(initialState, [EMPTY_COST]);
   queue.push(root);
 
-  // Plain BFS visits nodes in depth order; among violations found, keep
-  // the lexicographically best (devs, sum, depth). Depth is the BFS layer,
-  // so the first violation seen at a given (devs, sum) is the shortest.
+  // Among the violations found, keep the one that ranks least.
   type ErrorTransition = Extract<BaseTransition<State, Event>, { error: unknown }>;
-  type Best = { node: Node; via: ErrorTransition; cost: CostVector; devs: number; sum: number };
+  type Best = { node: Node; via: ErrorTransition; cost: CostVector; rank: Rank };
   let best: Best | null = null;
 
   for (let qi = 0; qi < queue.length; qi++) {
@@ -1103,14 +1123,11 @@ function shortestViolationFromTransitions<State, Event>(
 
     for (const t of trans) {
       const cost = addCost(current.cost, t.cost, t.index !== 0);
-      if (!costLE(cost, budget)) continue;
+      if (!withinBudget(cost, budget)) continue;
 
       if ('error' in t) {
-        const devs = cost.get(DEVIATIONS_KEY) ?? 0;
-        const sum = costSum(cost);
-        if (best === null || devs < best.devs || (devs === best.devs && sum < best.sum)) {
-          best = { node: current, via: t, cost, devs, sum };
-        }
+        const rank = rankOf(cost);
+        if (best === null || rankLess(rank, best.rank)) best = { node: current, via: t, cost, rank };
         continue;
       }
 

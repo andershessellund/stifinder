@@ -5,8 +5,9 @@
 // breadth-first search over (state, cost) pairs, straight from the model. It
 // checks what the README promises: the violation reported is the least by
 // (deviations, other cost, steps), its trace is a real path with the right
-// indexes and costs, `costs` is the Pareto frontier within the budget, and
-// `exhaustive` without a violation is a proof. It checks them after any
+// indexes and costs, `costs` is the Pareto frontier within the budget (steps
+// are one of its keys), and `exhaustive` without a violation is a proof.
+// Budgets bound steps as often as not, and leave keys out, which is no limit. It checks them after any
 // history of calls on one cache, too: budgets up and down, runs cut short,
 // callbacks that throw.
 //
@@ -21,6 +22,7 @@ import {
   type Model,
   type ViolationPath,
   DEVIATIONS_KEY,
+  STEPS_KEY,
   StateSpaceCache,
   analyzeCache,
   explore,
@@ -107,8 +109,8 @@ function toModel(spec: Spec): Model<number, string> {
 // The oracle
 // ---------------------------------------------------------------------------
 
-type Cost = { dev: number; x: number; y: number };
-type Rank = [devs: number, sum: number, steps: number];
+type Cost = { dev: number; x: number; y: number; steps: number };
+type Rank = [devs: number, other: number, steps: number];
 
 /** Reaching a state: fine, a violation (the state is bad), or a throw. */
 function arrive(spec: Spec, s: number): 'fine' | 'throws' | { error: string } {
@@ -118,21 +120,24 @@ function arrive(spec: Spec, s: number): 'fine' | 'throws' | { error: string } {
   return 'fine';
 }
 
-const le = (a: Cost, b: Cost) => a.dev <= b.dev && a.x <= b.x && a.y <= b.y;
-const same = (a: Cost, b: Cost) => a.dev === b.dev && a.x === b.x && a.y === b.y;
-const sum = (c: Cost) => c.dev + c.x + c.y;
+const le = (a: Cost, b: Cost) => a.dev <= b.dev && a.x <= b.x && a.y <= b.y && a.steps <= b.steps;
+const same = (a: Cost, b: Cost) => a.dev === b.dev && a.x === b.x && a.y === b.y && a.steps === b.steps;
+const rankOf = (c: Cost): Rank => [c.dev, c.x + c.y, c.steps];
 const less = (a: Rank, b: Rank) => (a[0] !== b[0] ? a[0] < b[0] : a[1] !== b[1] ? a[1] < b[1] : a[2] < b[2]);
 const step = (c: Cost, cost: string[], index: number): Cost => ({
   dev: c.dev + (index > 0 ? 1 : 0),
   x: c.x + cost.filter((k) => k === 'x').length,
   y: c.y + cost.filter((k) => k === 'y').length,
+  steps: c.steps + 1,
 });
 
 /** A budget that covers every simple path, and so every Pareto-minimal cost
- *  and the least violation: what an unbounded budget sees. */
+ *  and the least violation: what an unbounded budget sees. (A path that
+ *  goes round a cycle costs a step more than the one that does not, and no
+ *  less of anything else.) */
 const unbounded = (spec: Spec): Cost => {
   const n = spec.events.length;
-  return { dev: n + 1, x: 2 * n + 2, y: 2 * n + 2 };
+  return { dev: n + 1, x: 2 * n + 2, y: 2 * n + 2, steps: Infinity };
 };
 
 interface Truth {
@@ -145,8 +150,11 @@ interface Truth {
 }
 
 function oracle(spec: Spec, budget: Cost): Truth {
-  const b = { ...budget, dev: Math.min(budget.dev, unbounded(spec).dev) };
-  const zero: Cost = { dev: 0, x: 0, y: 0 };
+  // An unbounded key is searched as far as any simple path takes it, which
+  // keeps the search finite. Steps need no cap: they are not in `seen`.
+  const most = unbounded(spec);
+  const b: Cost = { dev: Math.min(budget.dev, most.dev), x: Math.min(budget.x, most.x), y: Math.min(budget.y, most.y), steps: budget.steps };
+  const zero: Cost = { dev: 0, x: 0, y: 0, steps: 0 };
   const frontier = new Map<number, Cost[]>();
   let rank: Rank | null = null;
   let throws = false;
@@ -158,20 +166,22 @@ function oracle(spec: Spec, budget: Cost): Truth {
   if (start === 'throws') return { throws: true, rank, frontier };
   if (start !== 'fine') return { throws, rank: [0, 0, 0], frontier: new Map([[0, [zero]]]) };
 
+  // Breadth-first, so a state is first seen at each (deviations, x, y) in
+  // the fewest steps, and whatever follows a later sighting follows that one.
   const seen = new Set(['0|0|0|0']);
-  const queue: [number, Cost, number][] = [[0, zero, 0]];
+  const queue: [number, Cost][] = [[0, zero]];
   for (let qi = 0; qi < queue.length; qi++) {
-    const [s, c, depth] = queue[qi]!;
+    const [s, c] = queue[qi]!;
     spec.events[s]!.forEach(({ cost, to }, index) => {
       const next = step(c, cost, index);
       if (!le(next, b)) return;
-      if (typeof to === 'string') return consider([next.dev, sum(next), depth + 1]);
+      if (typeof to === 'string') return consider(rankOf(next));
       const outcome = arrive(spec, to);
       if (outcome === 'throws') throws = true;
-      else if (outcome !== 'fine') consider([next.dev, sum(next), depth + 1]);
+      else if (outcome !== 'fine') consider(rankOf(next));
       else if (!seen.has(`${to}|${next.dev}|${next.x}|${next.y}`)) {
         seen.add(`${to}|${next.dev}|${next.x}|${next.y}`);
-        queue.push([to, next, depth + 1]);
+        queue.push([to, next]);
       }
     });
   }
@@ -184,15 +194,34 @@ function oracle(spec: Spec, budget: Cost): Truth {
 // Checking a result against it
 // ---------------------------------------------------------------------------
 
-const toCost = (v: ReadonlyMap<string, number>): Cost => ({ dev: v.get(DEVIATIONS_KEY) ?? 0, x: v.get('x') ?? 0, y: v.get('y') ?? 0 });
-const toBudget = (c: Cost): BudgetLike => ({ [DEVIATIONS_KEY]: c.dev, x: c.x, y: c.y });
+const toCost = (v: ReadonlyMap<string, number>): Cost => ({
+  dev: v.get(DEVIATIONS_KEY) ?? 0,
+  x: v.get('x') ?? 0,
+  y: v.get('y') ?? 0,
+  steps: v.get(STEPS_KEY) ?? 0,
+});
+/** The allowances for every key but deviations. An unbounded one is left out: a missing key is no limit. */
+const allowances = (c: Omit<Cost, 'dev'>): Record<string, number> =>
+  Object.fromEntries([['x', c.x], ['y', c.y], [STEPS_KEY, c.steps]].filter(([, allowance]) => allowance !== Infinity)) as Record<string, number>;
+/** Unbounded deviations are spelled out in every other budget and left out of
+ *  the rest, so both ways of saying no limit are used for them too. */
+let spellOut = false;
+const toBudget = (c: Cost): BudgetLike => {
+  spellOut = !spellOut;
+  return { ...(c.dev === Infinity && !spellOut ? {} : { [DEVIATIONS_KEY]: c.dev }), ...allowances(c) };
+};
 /** JSON for a failure message, with an unbounded budget spelled out (JSON would say null). */
 const show = (value: unknown) => JSON.stringify(value, (_, v: unknown) => (v === Infinity ? 'Infinity' : v));
 const describeFrontier = (f: Map<number, Cost[]>) =>
-  [...f].map(([s, cs]) => `${s}: ${cs.map((c) => `${c.dev}/${c.x}/${c.y}`).sort().join(' ')}`).sort();
+  [...f].map(([s, cs]) => `${s}: ${cs.map((c) => `${c.dev}/${c.x}/${c.y}/${c.steps}`).sort().join(' ')}`).sort();
+
+function randomBase(r: Random): Omit<Cost, 'dev'> {
+  const some = (n: number) => (r.chance(0.15) ? Infinity : r.int(n));
+  return { x: some(3), y: some(3), steps: r.chance(0.5) ? Infinity : r.int(8) };
+}
 
 function randomBudget(r: Random): Cost {
-  return { dev: r.chance(0.15) ? Infinity : r.int(4), x: r.int(3), y: r.int(3) };
+  return { dev: r.chance(0.15) ? Infinity : r.int(4), ...randomBase(r) };
 }
 
 /** `analysis` is what the oracle says holds at `budget`, and its traces are real. */
@@ -206,7 +235,7 @@ function expectAgrees(spec: Spec, budget: Cost, analysis: CacheAnalysis<number, 
   // not necessarily the same one), and a real trace to it.
   const found = { 'analysis.violation': analysis.violation, 'shortestViolation(analysis)': shortestViolation(analysis) };
   for (const [name, v] of Object.entries(found)) {
-    expect(v === null ? null : [toCost(v.cost).dev, sum(toCost(v.cost)), v.steps.length], `${where}; ${name}`).toEqual(truth.rank);
+    expect(v === null ? null : rankOf({ ...toCost(v.cost), steps: v.steps.length }), `${where}; ${name}`).toEqual(truth.rank);
     if (v !== null) expectReplays(spec, v, `${where}; ${name}`);
   }
 }
@@ -214,7 +243,7 @@ function expectAgrees(spec: Spec, budget: Cost, analysis: CacheAnalysis<number, 
 /** `v` is a path in the model, with the indexes, costs, error and badState it claims. */
 function expectReplays(spec: Spec, v: ViolationPath<number, string>, where: string): void {
   let s = 0;
-  let c: Cost = { dev: 0, x: 0, y: 0 };
+  let c: Cost = { dev: 0, x: 0, y: 0, steps: 0 };
   let error: unknown = null;
   let badState: number | undefined;
   if (v.steps.length === 0) {
@@ -268,7 +297,8 @@ describe('against a brute-force oracle, on random models', () => {
       expectAgrees(spec, budget, analysis, `run ${run}`);
       if (result.exhaustive) expectProof(spec, analysis, `run ${run}`);
       // A smaller budget is covered too.
-      const smaller = { dev: r.int(Math.min(budget.dev, 5) + 1), x: r.int(budget.x + 1), y: r.int(budget.y + 1) };
+      const upTo = (allowance: number) => r.int(Math.min(allowance, 5) + 1);
+      const smaller = { dev: upTo(budget.dev), x: upTo(budget.x), y: upTo(budget.y), steps: upTo(budget.steps) };
       expectAgrees(spec, smaller, analyzeCache(cache, toBudget(smaller)), `run ${run}, smaller budget`);
     }
   });
@@ -293,10 +323,10 @@ describe('against a brute-force oracle, on random models', () => {
       const spec = randomSpec(r);
       const cache = new StateSpaceCache(toModel(spec));
       if (r.chance(0.5)) await randomHistory(r, cache); // a kept cache
-      const base = { x: r.int(3), y: r.int(3) };
+      const base = randomBase(r);
       const maxDeviations = r.chance(0.2) ? Infinity : r.int(6);
       const stopOnViolation = r.chance(0.7);
-      const space = await exploreIteratively(cache, { baseBudget: base, maxDeviations, stopOnViolation, maxEdges: 1e6 });
+      const space = await exploreIteratively(cache, { baseBudget: allowances(base), maxDeviations, stopOnViolation, maxEdges: 1e6 });
       const d = space.maxDeviationsReached;
       const context = `run ${run}: ${show({ base, maxDeviations, stopOnViolation, d })}`;
 
