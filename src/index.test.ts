@@ -1025,6 +1025,33 @@ describe('terminalInvariant', () => {
     expect(paid.violation).toMatchObject({ error: 'stuck', badState: '3' });
   });
 
+  it('nor is a state whose only event is a fault, at any budget: a fault goes beside a free event', async () => {
+    const terminalInvariant = (state: string) => (state.startsWith('waiting') ? { error: `ended at ${state}` } : undefined);
+    const budget = { crash: 1, [DEVIATIONS_KEY]: Infinity };
+    // All that can happen at `waiting` is a crash. It is reached for free, or by an earlier crash.
+    const alone = {
+      ...graph('0', {
+        '0': [['go', [], 'waiting'], ['crash early', ['crash'], 'waiting']],
+        waiting: [['crash', ['crash'], 'recovered']],
+      }),
+      terminalInvariant,
+    };
+    // The run that crashed early ends at `waiting`, its one crash spent. So may the other: a crash
+    // never has to happen. Nothing checks either, since `waiting` has an event, and one this budget affords.
+    expect(await exploreOnce(alone, budget)).toMatchObject({ violation: null, exhaustive: true });
+    // Beside a free event, not crashing is a step, and where it leads is an end.
+    const beside = {
+      ...graph('0', {
+        '0': [['go', [], 'waiting'], ['crash early', ['crash'], 'waiting']],
+        waiting: [['stay', [], 'waiting, for good'], ['crash', ['crash'], 'recovered']],
+      }),
+      terminalInvariant,
+    };
+    const space = await exploreOnce(beside, budget);
+    expect(space.violation).toMatchObject({ error: 'ended at waiting, for good', badState: 'waiting, for good' });
+    expect(space.violation!.steps.map((s) => s.event)).toEqual(['go', 'stay']);
+  });
+
   it('comes after invariant, which still keeps getEvents away from a state it fails', async () => {
     const calls: string[] = [];
     const space = await exploreIteratively<string, string>({

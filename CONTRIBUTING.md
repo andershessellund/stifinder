@@ -7,7 +7,9 @@ small, but it is the same for everyone, the maintainer included.
 
 For anything beyond a small fix, open an issue first. Which violation is
 reported, and what the cache promises across budgets, are stated in the
-[README](README.md); a change to either is a conversation that is cheaper
+[README](README.md), and argued for in [DESIGN.md](DESIGN.md) and
+[DECISIONS.md](DECISIONS.md). A change that contradicts a recorded decision
+needs to say why the decision was wrong, and that conversation is cheaper
 before the code exists.
 
 ## Setup
@@ -84,7 +86,12 @@ Write the title as the changelog line you would want to read: it is one.
 What a PR should contain:
 
 - **Tests.** A bug fix starts with a test that fails without it.
-- **Docs**, when behaviour changes: the README is the documentation.
+- **Docs**, when behaviour changes: the README, which is the user
+  documentation, and the `DESIGN.md` section.
+- **A `DECISIONS.md` entry**, when the change makes or reverses a design
+  choice: what was decided, why, and what was rejected. Where a rejection
+  rests on a counterexample, the counterexample is a test, and the entry
+  names it.
 
 ## Versioning
 
