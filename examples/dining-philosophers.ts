@@ -8,14 +8,14 @@
 // their two forks first, that cannot happen.
 //
 // stifinder shows both. For the first it finds the shortest schedule that
-// deadlocks, and says how far that schedule strays from the expected one. For
-// the second it explores every schedule and finds nothing, which, for a fixed
-// N, is a proof.
+// deadlocks, and says how far that schedule strays from the expected one, in
+// the words the model gives for a step and a table. For the second it
+// explores every schedule and finds nothing, which, for a fixed N, is a proof.
 //
 //     pnpm build && node examples/dining-philosophers.ts
 // ---------------------------------------------------------------------------
 import { fileURLToPath } from 'node:url';
-import { DEVIATIONS_KEY, type Model, exploreIteratively } from 'stifinder';
+import { type Model, ViolationError, check } from 'stifinder';
 
 export type ForkOrder = 'left-first' | 'lowest-first';
 
@@ -67,28 +67,26 @@ export function diningPhilosophers(n: number, order: ForkOrder): Model<Table, St
     // Nobody ever leaves the table, so there is no good way for a run to end:
     // a table where nobody can move is everybody waiting for somebody else.
     terminalInvariant: () => ({ error: new Error('deadlock') }),
+
+    // How a step and a table read in a report. A search never calls these.
+    describeEvent: (step) => `P${step.phil} ${step.does === 'take' ? `takes fork ${step.fork}` : 'puts down both forks'}`,
+    describeState: (table) =>
+      table.holder.map((phil, fork) => (phil === null ? `fork ${fork} lies free` : `P${phil} has fork ${fork}`)).join(', '),
   };
 }
 
 /** Explore the table of `n` under `order`, and say what was found. */
 export async function report(n: number, order: ForkOrder): Promise<string[]> {
-  const { violation, exhaustive, costs, edgesComputed } = await exploreIteratively(diningPhilosophers(n, order));
-
-  if (violation) {
-    // This model's only error is the terminalInvariant's, and that always carries the state.
-    const held = violation.badState!.holder.map((phil, fork) => `P${phil} has fork ${fork}`);
-    return [
-      `${order}: deadlock, ${violation.cost.get(DEVIATIONS_KEY) ?? 0} deviations from the expected schedule.`,
-      ...violation.steps.map(({ event, index }) => {
-        const does = event.does === 'take' ? `takes fork ${event.fork}` : 'puts down both forks';
-        return `  P${event.phil} ${does}${index > 0 ? '  (cuts in)' : ''}`;
-      }),
-      `  and there they sit: ${held.join(', ')}.`,
-    ];
+  try {
+    // As a test would: `check` rejects with the violation, rendered.
+    const { exhaustive, costs, maxDeviationsReached } = await check(diningPhilosophers(n, order));
+    // Nothing FOUND is only nothing THERE if nothing was left unexplored.
+    if (!exhaustive) return [`${order}: no deadlock within ${maxDeviationsReached} deviations.`];
+    return [`${order}: no deadlock. ${costs.size} states, every schedule explored.`];
+  } catch (error) {
+    if (!(error instanceof ViolationError)) throw error;
+    return `${order}: ${error.message}`.split('\n');
   }
-  // Nothing FOUND is only nothing THERE if nothing was left unexplored.
-  if (!exhaustive) return [`${order}: gave up after ${edgesComputed} steps.`];
-  return [`${order}: no deadlock. ${costs.size} states, every schedule explored.`];
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

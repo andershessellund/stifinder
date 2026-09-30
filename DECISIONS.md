@@ -533,7 +533,7 @@ Given eight deliberate one-line bugs in the search, from taking depths
 deepest-first to not putting interrupted edges back, it fails on every one.
 400,000 models passed at #15, and 160,000 at #17 on the strengthened test,
 which also checks `shortestViolation`. **Cost.** About 100 ms for 300
-models per property; more on request (`FUZZ_RUNS`). DESIGN.md §9.
+models per property; more on request (`FUZZ_RUNS`). DESIGN.md §10.
 
 ### D26. valsem is a peer dependency, and CI tests its floor (#18)
 
@@ -550,7 +550,8 @@ is a required check, are under Open.
 
 Settled in the design discussion of 2026-09-30, from two users of
 stifinder: kilde's `kilde/testing`, and the Durable Object simulator
-stifinder was extracted from. None of this is built; see Open.
+stifinder was extracted from. D28, D34 and D35 are built. The rest is not:
+see Open.
 
 ### D27. stifinder owns the test-facing layer; simulators stay with their systems
 
@@ -573,8 +574,9 @@ but a self-test.
 
 ### D28. Names are asked of the model when a report is rendered
 
-A model may say how an event reads at a state, and how a state reads.
-Neither is called during a search.
+A model may have `describeEvent(event, state)`, how an event reads at the
+state it is taken at, and `describeState(state)`. A search calls neither;
+`formatViolation` calls them for the steps of the one path it renders.
 
 **Why.** In the simulator an event is named from the state it is taken at:
 its indices are resolved against the pre-state's in-flight requests. A
@@ -584,7 +586,51 @@ stored with the event list, the first recommendation in the discussion. It
 builds a string for every event offered on every edge of a search that
 reports at most one path, and state summaries would need a lazy form
 anyway. The decision harness keeps its labels in a table of its own and
-answers from that.
+answers from that. **Cost.** A describer is outside the purity a model
+owes its callbacks (D1), and may fail on its own account. So one that
+throws is treated as one that says nothing, and the value is shown as it
+is: reporting a failure must not hide it. DESIGN.md §2.2, §9.2.
+
+### D34. `check` rejects on a violation, and on a search cut short
+
+`check` resolves with the result only when the search found nothing and
+was not stopped by `maxEdges` or `timeoutMs`. A violation rejects with a
+`ViolationError`, a search cut short with an `IncompleteError`, unless
+`incomplete: 'allow'`.
+
+**Why.** Both users wrapped `exploreIteratively` in a function that turns a
+result into a verdict, and differed on the case that matters. kilde's
+rejects when the search did not complete. The simulator's logs a timeout
+and returns, and none of its tests asserts `completed`: a search stopped by
+the timeout, or by the 100,000-edge default, passes there with `violation:
+null`. A test that passes should mean the search looked at what it was
+asked to. **Rejected:** resolving with `completed: false` and leaving the
+test to assert it, which is the form that was not asserted. **Rejected:**
+resolving only when `exhaustive`. A search bounded on purpose, by
+`maxDeviations` or a step allowance, is a test worth having; whether it is
+a proof is the test's to assert on the result (D17). **Cost.** A test of a
+space too large to finish has to say so, with `incomplete: 'allow'`. A
+violation found by a search that was cut short is thrown like any other,
+though it is only the fewest deviations it guarantees (D10). Tests:
+`check`. DESIGN.md §9.1.
+
+### D35. A report lists every step, in the model's words, with what each was charged
+
+`formatViolation` gives the error first, then the cost of the path, then
+one line per step, then the state that failed. Its text is not API.
+
+**Why.** Each user had written this by hand: the dining philosophers
+example, kilde's list of deviations, the simulator's trace. The error comes
+first because a test runner's summary is the first line of a message. A
+step shows what it was charged, a deviation or a cost key of the model's,
+because that is where the budget went, and a reader would otherwise find it
+by differencing the costs of neighbouring steps (D20). The wording is left
+free, as the text of an error message already is (D23). **Evidence.** The
+example's own report was a dozen lines of formatting and is two
+describers; its output, which the README quotes, is the library's.
+**Cost.** Every step is a line, so a long path is a long message. A view of
+the deviations alone, which is what kilde prints, is under Open with the
+harness that needs it. Tests: `formatViolation`. DESIGN.md §9.2.
 
 ### D29. Notes reach the recorder through an argument
 
@@ -602,7 +648,8 @@ argument to where its notes are made.
 
 ### D30. One entry point
 
-Everything is exported from `stifinder`.
+Everything is exported from `stifinder`. Behind it the source is modules,
+the search, the report and `check`, which the entry point exports whole.
 
 **Why.** stifinder is a testing tool throughout, and the harness adds no
 dependency. The test entry takes a model, a cache or a body, so the root
@@ -619,21 +666,18 @@ tied violations is reported (D11).
 
 ## Open
 
-**Decided, not built.** The model's describers (D28) and the recorder
-argument (D29).
+**Decided, not built.** The recorder argument (D29).
 
 **Proposed, not decided.** The surface sketched in the discussion of D27;
 every name is provisional.
 
-- `check(model | cache | body, options)`: a search as a test. It rejects
-  with the rendered violation, and by default also when `maxEdges` or
-  `timeoutMs` cut the search short. The simulator's harness only logs a
-  timeout, and none of its tests asserts `completed`, so a search stopped
-  by a limit passes there.
-- `formatViolation`, and `explain`, which re-applies each step of a path
-  with the recorder on and says whether the path reproduced.
-- `findPath(space, where)`: the shortest path to a state that satisfies a
-  predicate, for "no state where" and for "some state where".
+- `explain`, which re-applies each step of a path with the recorder on and
+  says whether the path reproduced, and a report that shows its notes.
+- `findPath(cache, where)`: the shortest path to a state that satisfies a
+  predicate, for "no state where" and for "some state where". From the
+  cache, which holds every arrival with its predecessor (D31).
+- `check(body)`, and a view of a report that lists the deviations alone.
+  Both come with the decision harness.
 - The decision harness moved from kilde: an oracle with `integer`, a
   `choose` whose alternatives carry cost keys, and `note`; a model built
   from a body; a single run of a given decision sequence. Two defects in

@@ -46,6 +46,9 @@ Three properties arrive together:
 3. **Deepening is free of rework.** One cache serves every budget, in any
    order, and no callback runs twice for the same arguments (§4).
 
+Around the search is what a test needs of it: a verdict, and a failure a
+reader can follow (§9).
+
 ### 1.1 Position in the stack
 
 stifinder knows nothing of the system under test. States and events are
@@ -68,8 +71,9 @@ declarations (`stripInternal`), so the types a consumer sees are the API
 
 ### 2.1 What a model is
 
-A `Model<State, Event>` is five things, the last two optional. Every
-callback may return its result or a promise of it (D9).
+A `Model<State, Event>` is seven things, the last four optional. The
+callbacks and checks may return their result or a promise of it (D9); the
+two descriptions return a string.
 
 | Part | What it says |
 | --- | --- |
@@ -78,6 +82,8 @@ callback may return its result or a promise of it (D9).
 | `applyEvent(state, event)` | `{ to }` for the successor, `{ error }` for a failure; a throw is `{ error }` |
 | `invariant(state)` | `{ error }` for a state that must never be reached; a throw is `{ error }` |
 | `terminalInvariant(state)` | the same, for a state where nothing more can happen |
+| `describeEvent(event, state)` | how an event reads where it is taken, for a report |
+| `describeState(state)` | how a state reads, for a report |
 
 ### 2.2 Callbacks are pure, and each result is kept
 
@@ -86,6 +92,9 @@ each result for as long as it lives: `getEvents` and both checks per state,
 `applyEvent` per (state, event). A callback that reads a clock, a random
 source or state outside the model produces a wrong state space, silently.
 Why: D1.
+
+The two descriptions are no part of this. A search never calls them; a
+report does, for the steps of the one path it renders (§9.2, D28).
 
 ### 2.3 States and events are values
 
@@ -363,7 +372,50 @@ compute nothing, and only traverse what the cache holds (D31).
 
 ---
 
-## 9. Verification
+## 9. A search as a test
+
+### 9.1 `check`
+
+`check(cacheOrModel, options)` is `exploreIteratively` with a verdict.
+
+- A violation in the result rejects with a `ViolationError`, whether or not
+  the search completed.
+- A search cut short by `maxEdges` or `timeoutMs` with nothing found rejects
+  with an `IncompleteError`, unless `incomplete: 'allow'`.
+- Anything else resolves with the `StateSpace`.
+
+Resolving says the budget is clear, no more (§8). A search bounded on
+purpose, by `maxDeviations` or a step allowance, resolves; where a test
+means a proof, it asserts `exhaustive` on the result. Why: D34.
+
+### 9.2 The report
+
+`formatViolation(violation, model?)` renders a violation as lines of text:
+
+1. the error: an `Error`'s message, anything else as it is;
+2. what the path cost: deviations, steps, then the model's own keys by
+   name;
+3. one line per step, numbered: the event, then in brackets what the step
+   was charged besides the step itself, a deviation (its index is not 0)
+   and each of the model's keys that the cost after it holds more of than
+   the cost before;
+4. the state that failed a check, if one did.
+
+An event is described by `model.describeEvent(event, state)`, with the
+state it was taken at, and the failing state by `model.describeState`. This
+is the only place either is called. Where a model has no describer, or the
+describer throws, the value is shown as it is: a string plainly, anything
+else as JSON. A failure being reported is never hidden by the reporting of
+it. The text is for people, and its wording is not API. Why: D28, D35.
+
+A `ViolationError` has the report as its message, the path as `violation`,
+and the model's error as `cause`. An `IncompleteError` says which limit
+stopped the search, how many edges it had computed, and the highest
+deviation budget it completed.
+
+---
+
+## 10. Verification
 
 `src/oracle.test.ts` checks the search against a brute-force oracle on
 seeded random models (D25). The oracle is a breadth-first search over
@@ -375,20 +427,25 @@ violation is a proof. It checks them after random histories of calls on
 one cache: budgets up and down, runs cut short, callbacks that throw.
 `FUZZ_RUNS` and `FUZZ_SEED` run more models, or others.
 
-`src/index.test.ts` pins each documented behaviour by name, and the
-regressions. The examples have tests, because the README quotes their
-output. CI also runs the suite against the oldest valsem the peer range
-admits, and checks the packed tarball's `exports` and types.
+The other suites, beside the modules they test, pin each documented
+behaviour by name, and the regressions. The examples have tests, because
+the README quotes their output. CI also runs the suite against the oldest
+valsem the peer range admits, and checks the packed tarball's `exports` and
+types.
 
 ---
 
-## 10. Package layout
+## 11. Package layout
 
 | Path | Responsibility |
 | --- | --- |
-| `src/index.ts` | the whole library: cost helpers, `StateSpaceCache`, `explore`, `analyzeCache`, `exploreIteratively`, `exploreOnce`, `shortestViolation` |
-| `src/index.test.ts` | behaviour and regressions |
-| `src/oracle.test.ts` | the brute-force oracle (§9) |
+| `src/index.ts` | the one entry point: it exports the three modules below |
+| `src/search.ts` | the model, cost helpers, `StateSpaceCache`, `explore`, `analyzeCache`, `exploreIteratively`, `exploreOnce`, `shortestViolation` |
+| `src/report.ts` | `formatViolation`, `ViolationError`, `IncompleteError` |
+| `src/check.ts` | `check` |
+| `src/index.test.ts` | behaviour and regressions of the search |
+| `src/report.test.ts`, `src/check.test.ts` | the report, and the verdict |
+| `src/oracle.test.ts` | the brute-force oracle (§10) |
 | `examples/` | runnable models, imported as `stifinder`, which the test config maps to `src/` |
 | `scripts/check-commit-message.mjs` | the release-notes check CONTRIBUTING describes |
 
@@ -397,7 +454,7 @@ job that builds nothing; CONTRIBUTING.md and SECURITY.md describe both.
 
 ---
 
-## 11. Design laws
+## 12. Design laws
 
 1. **A result never claims more than was explored.** `exhaustive` is the
    only proof; `completed` clears a budget.
@@ -416,3 +473,7 @@ job that builds nothing; CONTRIBUTING.md and SECURITY.md describe both.
    way. A budget bounds what it names, and nothing else.
 9. **The order of exploration is not API**, beyond what the reported
    violation depends on.
+10. **A test passes only if the search looked at what it was asked to.**
+    Cut short, it fails, unless the test says otherwise.
+11. **Reporting a failure never hides it.** A describer that throws is one
+    that says nothing.
