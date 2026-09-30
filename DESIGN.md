@@ -413,6 +413,52 @@ and the model's error as `cause`. An `IncompleteError` says which limit
 stopped the search, how many edges it had computed, and the highest
 deviation budget it completed.
 
+With `steps: 'deviations'` the report lists only the steps charged
+something besides the step itself, under their own numbers. It is the
+default for a body (§9.3), whose expected steps have no words of their own.
+
+### 9.3 Code that decides
+
+`decisionModel(body)` makes a `Model` of a function of a `Decisions`
+object, which the body asks at each point where more than one thing could
+happen: `integer(range, label?)` for a number below `range`, `choose(
+alternatives)` for one of several values, each with a label and cost keys
+of its own. The first pick is the expected one; any other is a deviation.
+A range of 1, or a single alternative, is no decision.
+
+- **A state is the decisions made so far**, an interned array of picks. It
+  is opaque to a caller (`DecisionState`); `describeState` renders it as
+  `decisions [0, 0, 1]`, and the events of a violation's steps are the
+  picks. **An event is the next pick.**
+- **`applyEvent(prefix, k)`** is `prefix + [k]`, and computes nothing.
+- **A run is made when a state is first asked about**, by `invariant` or
+  `getEvents`: the body runs with the state's picks replayed and 0
+  answered to every decision after them. That run reaches, and records,
+  every state along its default continuation: what each decides, or that it
+  ends there, or the error it throws. So the body runs once per leaf of the
+  decision tree, and no state is reached twice.
+- **A failure is a fact about the state the run reached**, reported by
+  `invariant`. The initial state is checked like any other, so a body that
+  throws before its first decision fails there, with no steps.
+- **A promise returned by the body is awaited**, and its rejection is the
+  body's failure. The body is told nothing of the search; it must decide
+  the same way given the same answers, and must not decide after it has
+  returned or settled.
+- **Determinism is checked** where a run replays a decision: the number of
+  alternatives must be what it was when the decision was first met, and a
+  run must make at least as many decisions as it replays. A wrong use of
+  `Decisions` (a range below 1, no alternatives) is an error of the harness,
+  thrown through the body and never taken for its failure.
+- **Labels** are how a pick reads: an alternative's own, or `integer`'s
+  label for a pick that is not 0 (a function is given the pick; words get
+  the pick added above two alternatives), and the pick itself otherwise.
+
+`check(body)` is `check(decisionModel(body))` with the report showing the
+deviations alone. `runOnce(body, decisions)` runs the body once with those
+decisions replayed, for seeing a reported failure again; a decision the
+body does not offer, or more decisions than it makes, is an error. Why:
+D36, D37.
+
 ---
 
 ## 10. Verification
@@ -443,8 +489,9 @@ types.
 | `src/search.ts` | the model, cost helpers, `StateSpaceCache`, `explore`, `analyzeCache`, `exploreIteratively`, `exploreOnce`, `shortestViolation` |
 | `src/report.ts` | `formatViolation`, `ViolationError`, `IncompleteError` |
 | `src/check.ts` | `check` |
+| `src/decisions.ts` | `Decisions`, `decisionModel`, `runOnce` |
 | `src/index.test.ts` | behaviour and regressions of the search |
-| `src/report.test.ts`, `src/check.test.ts` | the report, and the verdict |
+| `src/report.test.ts`, `src/check.test.ts`, `src/decisions.test.ts` | the report, the verdict, and code that decides |
 | `src/oracle.test.ts` | the brute-force oracle (§10) |
 | `examples/` | runnable models, imported as `stifinder`, which the test config maps to `src/` |
 | `scripts/check-commit-message.mjs` | the release-notes check CONTRIBUTING describes |

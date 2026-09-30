@@ -550,8 +550,8 @@ is a required check, are under Open.
 
 Settled in the design discussion of 2026-09-30, from two users of
 stifinder: kilde's `kilde/testing`, and the Durable Object simulator
-stifinder was extracted from. D28, D34 and D35 are built. The rest is not:
-see Open.
+stifinder was extracted from. D28 and D34 to D37 are built. The rest is
+not: see Open.
 
 ### D27. stifinder owns the test-facing layer; simulators stay with their systems
 
@@ -632,6 +632,65 @@ describers; its output, which the README quotes, is the library's.
 the deviations alone, which is what kilde prints, is under Open with the
 harness that needs it. Tests: `formatViolation`. DESIGN.md §9.2.
 
+### D36. A body is explored through its decisions: the state is the decisions so far, and one run harvests a chain
+
+`decisionModel(body)` is the move of kilde's adapter. A state is the picks
+made so far, an event the next pick, and a run of the body with a state's
+picks replayed and 0 answered after them records every state along that
+default continuation. A run's failure is reported by `invariant` on the
+state it reached, and a promise the body returns is awaited.
+
+**Why.** JavaScript cannot capture a continuation, so a body can only be
+put back into a state by running it there again, and the decisions it made
+are what it takes to do that. Recording the whole default continuation of a
+run means the body runs once per leaf of its decision tree, which is
+exactly the count of a depth-first enumeration: kilde's experiment of
+2026-09-13 measured the same 2,287 runs on its suite of 92 tests under
+both, and twice the time, from about 5 µs of search per edge against a body
+of 30 µs. **Rejected:** stopping a run at the first decision it has no
+answer for, which runs the body once per edge instead. **Rejected:** kilde's
+two ways of reporting a failure, both defects. It reported a run's error on
+the edge into the state the run reached, so a body that throws before its
+first decision, which reaches only the initial state, passed as exhaustive;
+seven of kilde's own tests give it an empty source, and the one of them
+checked consults no decision, so its assertions cannot fail. And it did not
+await a body's promise, so an async body's rejection escaped
+as unhandled and the body passed. `invariant` covers the initial state
+(D5), and awaiting is what the callbacks already do (D9). Tests: `a body of
+code, explored through its decisions` › "a body that throws before its
+first decision fails at the initial state", "a body that returns a promise
+is awaited, and its rejection is its failure". **Cost.** No state is
+reached twice, so the cache's sharing of states does nothing here, and the
+space is the tree of decision sequences, exponential in their length; a
+step allowance bounds it (D31). The body must be deterministic, and is told
+nothing of the search: the harness checks what it can, that a replayed
+decision has the alternatives it had, and that a run makes the decisions it
+replays. A state is a value the caller cannot look into (`DecisionState`),
+which leaves its form free: merging states by a fingerprint of the world at
+a decision, if a body can give one, is under Open. DESIGN.md §9.3.
+
+### D37. `choose` carries labels and cost keys; `integer` is kilde's oracle
+
+A decision is `choose(alternatives)`, each alternative a value with a label
+and cost keys, or `integer(range, label?)`, a number below `range`. A wrong
+use of either is an error of the harness, thrown through the body.
+
+**Why.** An alternative maps one to one onto an `EventDescriptor`: its
+position is the index, and so the deviation, and its keys are the event's
+cost. That gives a body the fault budgets a model has (D4): "at most one
+lost send". `integer(range, label)` keeps the signature of kilde's oracle,
+so its test doubles, which take an `{ oracle }` with that one method, work
+against a `Decisions` unchanged. The report of a body lists the deviations
+alone, since the expected picks have no words of their own, and ends with
+the decisions, which `runOnce` takes to run the failure again under a
+debugger; kilde printed both, and offered no way to replay. **Rejected:**
+taking a misuse of `Decisions` for a failure of the body: a range of 0 was
+a decision with no alternatives, and a `NaN` range made a state with no
+events. A body that catches everything cannot hide one now. **Cost.** A
+label for `integer` says what a pick other than 0 means, as kilde's did, so
+a full report reads "sink pauses after value #2: no" for the expected pick;
+`choose` names every alternative. DESIGN.md §9.3.
+
 ### D29. Notes reach the recorder through an argument
 
 `applyEvent` receives a third argument through which a model records what
@@ -676,13 +735,14 @@ every name is provisional.
 - `findPath(cache, where)`: the shortest path to a state that satisfies a
   predicate, for "no state where" and for "some state where". From the
   cache, which holds every arrival with its predecessor (D31).
-- `check(body)`, and a view of a report that lists the deviations alone.
-  Both come with the decision harness.
-- The decision harness moved from kilde: an oracle with `integer`, a
-  `choose` whose alternatives carry cost keys, and `note`; a model built
-  from a body; a single run of a given decision sequence. Two defects in
-  kilde's version must not come along: a body that throws before its first
-  decision passes as exhaustive, and an async body is not awaited.
+- A scheduler over `Decisions` for bodies with several tasks, which picks
+  the task to run next and settles between picks. The two that exist have
+  no user but a self-test (D27).
+- `decide.note(text)` on `Decisions`, the body's way to the recorder
+  (D29), shown by the report of a failing run.
+- Merging the states of a body by a fingerprint of the world at a decision,
+  where a body can give one, so that a state reached by two decision
+  sequences is explored once (D36). Nothing needs it at kilde's sizes.
 - `settle()`: resolves once the microtask queue has drained.
 - An `optional` mark on an event, so that `terminalInvariant` also runs
   where every event is optional, if a fault offered alone should be

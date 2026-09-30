@@ -145,6 +145,71 @@ it('the table never deadlocks', async () => {
 Otherwise it resolves with the result. That is a search that cleared its
 budget, which is not yet a proof: the table below says what is.
 
+## Code that decides
+
+Code can be explored without a model of it. It asks for its decisions, and
+the search makes them:
+
+```ts
+import { check } from 'stifinder';
+
+// The code under test: send, and on failure try again, up to `attempts` times.
+function deliver(message: string, send: (message: string) => boolean, attempts: number): boolean {
+  for (let i = 0; i < attempts; i++) if (send(message)) return true;
+  return false;
+}
+
+it('delivers unless every attempt fails', async () => {
+  await check(
+    (decide) => {
+      const send = () =>
+        decide.choose([
+          { value: true, label: 'send succeeds' },
+          { value: false, label: 'send fails', cost: ['fault'] },
+        ]);
+      if (!deliver('hello', send, 3)) throw new Error('gave up');
+    },
+    { baseBudget: { fault: 2 } },
+  );
+});
+```
+
+The body is a function of a `Decisions` object. **`decide.choose(alternatives)`**
+picks one of them and returns its value; the first is what is expected to
+happen, and any other is a deviation, charging the cost keys it lists.
+**`decide.integer(range, label?)`** picks a number below `range`, 0 being the
+expected one, with `label` saying in words what another pick means. That is
+how the rest of a system's nondeterminism gets in: a test double that asks
+whether to pause, whether to drop the message, which reply arrives.
+
+The search runs the body once per decision sequence worth trying, fewest
+deviations first. Where the body throws, `check` rejects with the report:
+without the budget above, that is
+
+```
+gave up
+3 deviations, 3 steps, fault: 3
+  1. send fails  (deviation, fault)
+  2. send fails  (deviation, fault)
+  3. send fails  (deviation, fault)
+in state: decisions [1, 1, 1]
+```
+
+For a body the report lists the deviations alone, since the expected steps
+have no words of their own, and ends with the decisions that led there:
+**`runOnce(body, [1, 1, 1])`** runs the body once more with exactly those,
+under a debugger if you like.
+
+Two requirements. The body must make the same decisions given the same
+answers, since it is run again for every prefix; one whose decisions
+change between runs is rejected. And it must not go on deciding after it
+has returned, or after the promise it returned has settled. A body that
+throws before its first decision, or on the expected run, fails like any
+other, and a rejected promise is the body's failure.
+
+**`decisionModel(body)`** is the `Model` behind this, for use with the
+rest of the API, and says how many times the body has `runs`.
+
 ## Reading a result
 
 A search that finds nothing has cleared a budget, not the model, unless it
@@ -280,7 +345,13 @@ six.
   rejects with a `ViolationError` if there is a violation, and with an
   `IncompleteError` if a limit cut the search short before one was found
   (unless `incomplete: 'allow'`). Otherwise it resolves with the
-  `StateSpace`. See [In a test](#in-a-test).
+  `StateSpace`. See [In a test](#in-a-test). **`check(body, options?)`**
+  does the same for a body of code, through the decisions it asks for; see
+  [Code that decides](#code-that-decides).
+- **`decisionModel(body)`** is that body as a `Model<DecisionState, number>`,
+  where a state is the decisions made so far and an event the next one, with
+  `runs`, how many times the body has been run. **`runOnce(body, decisions)`**
+  runs it once with those decisions, and 0 for every one after.
 - **`formatViolation(violation, model?)`** renders a violation as text: the
   error, what the path cost, each step with what it was charged besides the
   step itself, and the state that failed a check. It uses the model's
@@ -333,6 +404,7 @@ whichever it is.
 | `maxDeviations` | iterative | `100` | deepest deviation budget tried; `Infinity` for no cap |
 | `stopOnViolation` | iterative | `true` | stop at the first failing budget |
 | `incomplete` | `check` | `'throw'` | what a search cut short by a limit does when it found nothing: reject, or with `'allow'` resolve |
+| `report` | `check` | | how a `ViolationError` renders the violation: `{ steps: 'all' }` or `{ steps: 'deviations' }`, the latter the default for a body |
 
 A run that hits a limit reports `completed: false` and leaves the cache
 consistent; the next `explore` on it picks up where it stopped. A callback
