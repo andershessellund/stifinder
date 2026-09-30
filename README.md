@@ -51,8 +51,8 @@ npm install stifinder valsem
 ## The model
 
 You describe a system as a `Model<State, Event>`: an `initialState`, two
-callbacks, and two optional checks. Each may be synchronous or return a
-promise.
+callbacks, two optional checks, and two optional descriptions. The callbacks
+and checks may be synchronous or return a promise.
 
 - **`getEvents(state)`** returns the events worth considering from a state,
   in *preference order*. Index 0 is the baseline, the thing that "should"
@@ -67,6 +67,9 @@ promise.
 - **`terminalInvariant(state)`**, optional, is the same check for the states
   where nothing more can happen: those for which `getEvents` returned `[]`.
   It runs after `invariant` has passed the state.
+- **`describeEvent(event, state)`** and **`describeState(state)`**,
+  optional, say how an event and a state read in a report. A search never
+  calls them: only a violation being rendered does, for its own steps.
 
 So an error can come from three places. `applyEvent` is where the system under
 test fails *while doing something*: it threw, and there is no next state.
@@ -115,6 +118,32 @@ Two requirements, both consequences of caching:
   once, so the ones your callbacks receive and the ones in results are
   canonical and frozen: equal means `===`, and a callback that mutates a
   state it is given throws there.
+
+## In a test
+
+```ts
+import { check } from 'stifinder';
+
+it('the table never deadlocks', async () => {
+  const space = await check(diningPhilosophers(5, 'lowest-first'));
+  expect(space.exhaustive).toBe(true); // nothing found, and nothing left to look at
+});
+```
+
+`check` runs `exploreIteratively` and rejects where a test should fail:
+
+- with a **`ViolationError`** when there is a violation. Its message is the
+  violation as `formatViolation` renders it: the error, what the path cost,
+  and the steps, each in the model's own words where it has a
+  `describeEvent`. Its `violation` is the path itself and its `cause` the
+  error the model gave.
+- with an **`IncompleteError`** when `maxEdges` or `timeoutMs` cut the search
+  short before it found anything. A search that stopped early has cleared
+  nothing in particular; pass `incomplete: 'allow'` to take its result
+  anyway.
+
+Otherwise it resolves with the result. That is a search that cleared its
+budget, which is not yet a proof: the table below says what is.
 
 ## Reading a result
 
@@ -195,25 +224,32 @@ return {
 
   // Nobody ever leaves the table, so any end is everybody waiting for somebody else.
   terminalInvariant: () => ({ error: new Error('deadlock') }),
+
+  // How a step and a table read in a report.
+  describeEvent: (step) => `P${step.phil} ${step.does === 'take' ? `takes fork ${step.fork}` : 'puts down both forks'}`,
+  describeState: (table) =>
+    table.holder.map((phil, fork) => (phil === null ? `fork ${fork} lies free` : `P${phil} has fork ${fork}`)).join(', '),
 };
 ```
 
 ```
 $ pnpm build && node examples/dining-philosophers.ts
-left-first: deadlock, 4 deviations from the expected schedule.
-  P0 takes fork 0
-  P1 takes fork 1  (cuts in)
-  P2 takes fork 2  (cuts in)
-  P3 takes fork 3  (cuts in)
-  P4 takes fork 4  (cuts in)
-  and there they sit: P0 has fork 0, P1 has fork 1, P2 has fork 2, P3 has fork 3, P4 has fork 4.
+left-first: deadlock
+4 deviations, 5 steps
+  1. P0 takes fork 0
+  2. P1 takes fork 1  (deviation)
+  3. P2 takes fork 2  (deviation)
+  4. P3 takes fork 3  (deviation)
+  5. P4 takes fork 4  (deviation)
+in state: P0 has fork 0, P1 has fork 1, P2 has fork 2, P3 has fork 3, P4 has fork 4
 lowest-first: no deadlock. 214 states, every schedule explored.
 ```
 
 When everyone reaches for their left fork first, the table can deadlock, and
-the report says how: the shortest way there (`violation.steps`, with each
-step's `index` telling a cut-in from a turn), how unlucky the scheduling has
-to be (`violation.cost`), and the table they end up at (`violation.badState`).
+`check` rejects with the report above as its message: the error, how unlucky
+the scheduling has to be (`violation.cost`), the shortest way there
+(`violation.steps`, a cut-in marked as the deviation it is), and the table
+they end up at (`violation.badState`).
 Budgets 0 to 3 were exhausted first, so no schedule with fewer than four
 interruptions deadlocks. When everyone reaches for the lower-numbered of their
 two forks first, the result is `exhaustive` and has no violation. That is a
@@ -240,6 +276,17 @@ six.
 
 ### Helpers
 
+- **`check(cacheOrModel, options?)`** is `exploreIteratively` as a test: it
+  rejects with a `ViolationError` if there is a violation, and with an
+  `IncompleteError` if a limit cut the search short before one was found
+  (unless `incomplete: 'allow'`). Otherwise it resolves with the
+  `StateSpace`. See [In a test](#in-a-test).
+- **`formatViolation(violation, model?)`** renders a violation as text: the
+  error, what the path cost, each step with what it was charged besides the
+  step itself, and the state that failed a check. It uses the model's
+  `describeEvent` and `describeState` where there are any; without them a
+  string is shown as it is and anything else as JSON. The text is for
+  people, and its wording is not API.
 - **`exploreIteratively(cacheOrModel, options?)`** calls `explore` with
   deviation budgets 0, 1, 2, … up to `maxDeviations`, stopping at the first
   budget that exhibits a violation (unless `stopOnViolation: false`) or once
@@ -285,6 +332,7 @@ whichever it is.
 | `baseBudget` | iterative | `{}` | allowances for every key but deviations; a key left out is not limited |
 | `maxDeviations` | iterative | `100` | deepest deviation budget tried; `Infinity` for no cap |
 | `stopOnViolation` | iterative | `true` | stop at the first failing budget |
+| `incomplete` | `check` | `'throw'` | what a search cut short by a limit does when it found nothing: reject, or with `'allow'` resolve |
 
 A run that hits a limit reports `completed: false` and leaves the cache
 consistent; the next `explore` on it picks up where it stopped. A callback
