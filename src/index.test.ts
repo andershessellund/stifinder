@@ -1,7 +1,10 @@
+import { ValueMap, isCanonical } from 'valsem';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   type ApplyResult,
   type CacheAnalysis,
+  type CostVector,
+  type ViolationPath,
   type EventDescriptor,
   type ExplorerConfig,
   type Model,
@@ -72,7 +75,9 @@ function graph(initial: string, edges: Record<string, Edge[]>): ExplorerConfig<s
   };
 }
 
-/** The embedded violation and the transition-table recomputation must agree. */
+/** The embedded violation and the transition-table recomputation have the
+ *  same rank, and each is a real path through the transitions. (Of several
+ *  violations that tie, they may pick different ones.) */
 function expectConsistent<State, Event>(analysis: CacheAnalysis<State, Event>): void {
   const recomputed = shortestViolation(analysis);
   if (analysis.violation === null) {
@@ -80,13 +85,32 @@ function expectConsistent<State, Event>(analysis: CacheAnalysis<State, Event>): 
     return;
   }
   expect(recomputed).not.toBeNull();
-  expect(recomputed!.error).toEqual(analysis.violation.error);
   expect(recomputed!.cost).toBe(analysis.violation.cost); // interned: equal vectors are identical
-  expect(recomputed!.badState).toEqual(analysis.violation.badState);
-  expect('badState' in recomputed!).toBe('badState' in analysis.violation);
-  expect(recomputed!.steps.map((s) => [s.state, s.cost, s.event, s.index])).toEqual(
-    analysis.violation.steps.map((s) => [s.state, s.cost, s.event, s.index]),
-  );
+  expect(recomputed!.steps).toHaveLength(analysis.violation.steps.length);
+  expectPath(analysis, analysis.violation);
+  expectPath(analysis, recomputed!);
+}
+
+/** `violation` follows `analysis.transitions` from the initial state, each
+ *  step at the cost it says, to the error it reports. */
+function expectPath<State, Event>(analysis: CacheAnalysis<State, Event>, violation: ViolationPath<State, Event>): void {
+  let state = analysis.initialState;
+  let cost: CostVector = ValueMap.empty();
+  for (const [i, step] of violation.steps.entries()) {
+    expect([step.state, step.cost], `step ${i}`).toEqual([state, cost]);
+    const t = analysis.transitions.get(step.state)!.find((t) => t.index === step.index)!;
+    expect(t.event, `step ${i}`).toEqual(step.event);
+    for (const key of t.cost) cost = cost.set(key, (cost.get(key) ?? 0) + 1);
+    if (t.index !== 0) cost = cost.set(DEVIATIONS_KEY, (cost.get(DEVIATIONS_KEY) ?? 0) + 1);
+    if (i < violation.steps.length - 1) {
+      expect('to' in t, `step ${i} leads on`).toBe(true);
+      if ('to' in t) state = t.to;
+    } else {
+      expect('error' in t && [t.error, t.badState]).toEqual([violation.error, violation.badState]);
+    }
+  }
+  if (violation.steps.length === 0) expect(violation.badState).toBe(analysis.initialState);
+  expect(violation.cost).toBe(cost);
 }
 
 afterEach(() => {
@@ -398,6 +422,18 @@ describe('limits', () => {
     expect(space.budget.get(DEVIATIONS_KEY)).toBe(1);
   });
 
+  it('edgesAddedThisRun counts the whole iterative run, as maxEdges does', async () => {
+    // Budget 0 computes two edges, budget 1 three more.
+    const model = graph('0', { '0': [['a', [], '1'], ['b', [], '2']], '1': [['a', [], '3'], ['b', [], '4']], '2': [['a', [], '5']] });
+    const fresh = await exploreIteratively(model);
+    expect([fresh.edgesAddedThisRun, fresh.edgesComputed]).toEqual([5, 5]);
+    // On a kept cache, only the run's own edges.
+    const cache = new StateSpaceCache(model);
+    await explore(cache, {});
+    const kept = await exploreIteratively(cache);
+    expect([kept.edgesAddedThisRun, kept.edgesComputed]).toEqual([3, 5]);
+  });
+
   it('timeoutMs bounds the whole iterative run, not each iteration', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     let calls = 0;
@@ -481,6 +517,37 @@ describe('a callback that throws', () => {
   });
 });
 
+describe('checked input', () => {
+  // A NaN or negative limit used to be read as no limit, or as zero:
+  // `Number(process.env.X)`, with X unset, is NaN.
+
+  it('a budget allowance must be a number, zero or more', async () => {
+    const cache = new StateSpaceCache(graph('0', { '0': [['a', ['x'], '1']] }));
+    const budgets: Record<string, number>[] = [{ x: NaN }, { x: -1 }, { [DEVIATIONS_KEY]: NaN }, { [DEVIATIONS_KEY]: -1 }];
+    for (const budget of budgets) {
+      await expect(explore(cache, budget)).rejects.toThrow(RangeError);
+      expect(() => analyzeCache(cache, budget)).toThrow(RangeError);
+    }
+    await expect(exploreIteratively(cache, { baseBudget: { x: NaN } })).rejects.toThrow(/budget for x/);
+    // Infinity is no limit.
+    expect(await explore(cache, { x: Infinity, [DEVIATIONS_KEY]: Infinity })).toMatchObject({ completed: true, exhaustive: true });
+  });
+
+  it('so must maxEdges and timeoutMs, and maxDeviations must be whole', async () => {
+    const model = graph('0', { '0': [['a', [], '1']] });
+    for (const options of [{ maxEdges: NaN }, { maxEdges: -1 }, { timeoutMs: NaN }, { timeoutMs: -5 }]) {
+      await expect(explore(new StateSpaceCache(model), {}, options)).rejects.toThrow(RangeError);
+      await expect(exploreIteratively(model, options)).rejects.toThrow(RangeError);
+    }
+    for (const maxDeviations of [NaN, -1, 1.5]) {
+      await expect(exploreIteratively(model, { maxDeviations })).rejects.toThrow(/maxDeviations/);
+    }
+    // Infinity is no limit, for each of them.
+    const unlimited = await exploreIteratively(model, { maxEdges: Infinity, timeoutMs: Infinity, maxDeviations: Infinity });
+    expect(unlimited).toMatchObject({ completed: true, exhaustive: true });
+  });
+});
+
 describe('regressions', () => {
   it('reusing a cache across non-monotone budgets does not lose deferred edges', async () => {
     const config = graph('root', {
@@ -519,6 +586,30 @@ describe('regressions', () => {
     const atOne = analyzeCache(cache, { [DEVIATIONS_KEY]: 1 });
     expect(atOne.violation).not.toBeNull();
     expectConsistent(atOne);
+  });
+
+  it('of violations that tie, either may be reported, and the two searches may differ', async () => {
+    // Index sequences [2,0,1] and [1,1,0]: two deviations and three steps each.
+    const space = await exploreIteratively(
+      graph('root', {
+        root: [['e0', [], 'X0'], ['e1', [], 'X1'], ['e2', [], 'X2']],
+        X1: [['h0', [], 'sink'], ['h1', [], 'Q']],
+        Q: [['i0', [], '!EQ']],
+        X2: [['f0', [], 'P']],
+        P: [['g0', [], 'sink'], ['g1', [], '!EP']],
+      }),
+    );
+    expect(['EP', 'EQ']).toContain(space.violation!.error);
+    expect(['EP', 'EQ']).toContain(shortestViolation(space)!.error);
+    expectConsistent(space);
+  });
+
+  it('shortestViolation(analysis) ends on any budget, an unbounded one included', async () => {
+    // A deviation back to where it started: a cycle that costs one deviation a lap.
+    const model = graph('0', { '0': [['on', [], '1'], ['back', [], '0']], '1': [['crash', [], '!crash']] });
+    const result = await exploreOnce(model, { [DEVIATIONS_KEY]: Infinity });
+    expect(shortestViolation(result)!.error).toBe('crash');
+    expectConsistent(result);
   });
 
   it('prefers the trace with the fewest steps among equal-cost violations', async () => {
@@ -734,6 +825,37 @@ describe('describing a model', () => {
     expect(space.violation!.error).toBe('broken');
     expect('badState' in space.violation!).toBe(false);
     expect(space.transitions.get(0)).toEqual([{ event: 'go', index: 0, cost: [], error: 'broken' }]);
+  });
+
+  it('states and events are canonical: callbacks get frozen values, and results share them', async () => {
+    const space = await exploreIteratively<{ n: number }, { go: number }>({
+      initialState: { n: 0 },
+      getEvents: (s) => (s.n < 2 ? [{ event: { go: s.n } }] : []),
+      applyEvent: (s) => (s.n === 1 ? { error: 'two' } : { to: { n: s.n + 1 } }),
+    });
+    const [first, second] = space.violation!.steps;
+    for (const step of [first!, second!]) {
+      expect([isCanonical(step.state), isCanonical(step.event), Object.isFrozen(step.state)]).toEqual([true, true, true]);
+    }
+    // The state the second step starts from is the one the first step's transition reached.
+    const transition = space.transitions.get(first!.state)![0]!;
+    expect('to' in transition && transition.to).toBe(second!.state);
+  });
+
+  it('a model that mutates a state it is given fails there, whichever state it is', async () => {
+    const space = await exploreIteratively<{ n: number }, string>({
+      initialState: { n: 0 },
+      getEvents: (s) => (s.n < 3 ? [{ event: 'inc' }] : []),
+      applyEvent(s) {
+        if (s.n === 1) {
+          s.n = 2; // not allowed: a state is a value
+          return { to: s };
+        }
+        return { to: { n: s.n + 1 } };
+      },
+    });
+    expect(space.violation!.error).toBeInstanceOf(TypeError);
+    expect(space.violation!.steps.map((s) => s.state)).toEqual([{ n: 0 }, { n: 1 }]);
   });
 });
 

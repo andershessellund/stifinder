@@ -30,9 +30,11 @@
 // `getEvents(state)` returns events in *preference order*. The event at
 // index 0 is the deviation-zero baseline; every other event charges one
 // unit of the implicit `__deviations__` budget — regardless of whether
-// the index-0 event is affordable under the current budget. This is
-// delay-bounded scheduling (Emmi, Qadeer & Rakamarić, POPL 2011) with the
-// delay budget generalized to a vector of user-defined cost dimensions.
+// the index-0 event is affordable under the current budget. This follows
+// delay-bounded scheduling (Emmi, Qadeer & Rakamarić, POPL 2011), except
+// that a departure costs one deviation whichever index it takes (a delay
+// skips one task, so the k-th alternative costs k delays there), and that
+// the budget is generalized to a vector of user-defined cost dimensions.
 //
 // Ordering of violations
 // ----------------------
@@ -60,9 +62,35 @@ export type BudgetVector = CostVector;
 /** Public API input form: accepts either a plain object or a `BudgetVector`. */
 export type BudgetLike = BudgetVector | Readonly<Record<string, number>>;
 
-/** Normalize an API-boundary budget input to a canonical `BudgetVector`. */
+/**
+ * Normalize an API-boundary budget input to a canonical `BudgetVector`.
+ * Every allowance must be a number, zero or more (`Infinity` for no limit);
+ * anything else is a `RangeError`, not a limit read some other way.
+ */
 export function toBudget(b: BudgetLike): BudgetVector {
-  return b instanceof ValueMap ? b : ValueMap.fromObject<number>(b);
+  const budget = b instanceof ValueMap ? b : ValueMap.fromObject<number>(b);
+  for (const [key, allowance] of budget.entries()) checkNotNegative(`the budget for ${key}`, allowance);
+  return budget;
+}
+
+/** Throw a `RangeError` unless `value` is a number, zero or more. */
+function checkNotNegative(what: string, value: unknown): void {
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) {
+    throw new RangeError(`stifinder: ${what} must be a number, zero or more (Infinity for no limit), not ${String(value)}`);
+  }
+}
+
+/** Check the limits an option object gives; a missing one is the default. */
+function checkLimits(options: ExploreOptions | IterativeOptions | undefined): void {
+  if (options?.maxEdges !== undefined) checkNotNegative('maxEdges', options.maxEdges);
+  if (options?.timeoutMs !== undefined) checkNotNegative('timeoutMs', options.timeoutMs);
+  if (options !== undefined && 'maxDeviations' in options && options.maxDeviations !== undefined) {
+    const d = options.maxDeviations;
+    checkNotNegative('maxDeviations', d);
+    if (!Number.isInteger(d) && d !== Infinity) {
+      throw new RangeError(`stifinder: maxDeviations must be a whole number (or Infinity), not ${d}`);
+    }
+  }
 }
 
 /** Reserved budget key counting non-preferred event choices along a path. */
@@ -199,7 +227,8 @@ export interface ExploreResult {
    *  explored at whatever budgets. */
   exhaustive: boolean;
   timedOut: boolean;
-  /** Edges (i.e. `applyEvent` calls) computed during *this* call (cache misses only). */
+  /** Edges (i.e. `applyEvent` calls) computed during *this* call (cache
+   *  misses only); for `exploreIteratively`, during the whole run. */
   edgesAddedThisRun: number;
   /** Cumulative edges in the cache after this call. */
   edgesComputed: number;
@@ -460,7 +489,7 @@ export class StateSpaceCache<State, Event> {
   async getEvents(state: State): Promise<Required<EventDescriptor<Event>>[]> {
     const cached = this.events.get(state);
     if (cached !== undefined) { this.counts.getEventsCacheHits++; return cached; }
-    const fresh = (await this.model.getEvents(state)).map((ev) => ({ event: ev.event, cost: ev.cost ?? NO_COST_KEYS }));
+    const fresh = (await this.model.getEvents(state)).map((ev) => ({ event: intern(ev.event), cost: ev.cost ?? NO_COST_KEYS }));
     for (const ev of fresh) {
       if (ev.cost.includes(DEVIATIONS_KEY)) {
         throw new Error(`stifinder: event cost must not include the reserved key ${DEVIATIONS_KEY}`);
@@ -497,10 +526,15 @@ export class StateSpaceCache<State, Event> {
       result = { error };
     }
     if ('to' in result) {
+      // The successor, canonical from here on, like the initial state and
+      // every event: each later lookup of it is a probe instead of a walk,
+      // results share one frozen copy, and a model that mutates a state it
+      // is given fails where it does, not somewhere later.
+      const to = intern(result.to);
       // An edge into a state that fails the invariant is an error edge: it
       // is stored, ordered and reported like any other, and carries the state.
-      const failure = await this.checkInvariant(result.to);
-      if (failure !== null) result = { error: failure.error, badState: intern(result.to) };
+      const failure = await this.checkInvariant(to);
+      result = failure === null ? { to } : { error: failure.error, badState: to };
     } else {
       // `badState` reports a state that failed a check, so it is the cache's
       // to add. An error from `applyEvent` is kept as the error alone.
@@ -604,6 +638,7 @@ export async function explore<State, Event>(
   budget: BudgetLike,
   options?: ExploreOptions,
 ): Promise<ExploreResult> {
+  checkLimits(options);
   const timeoutMs = options?.timeoutMs;
   return exploreUntil(cache, toBudget(budget), {
     maxEdges: options?.maxEdges ?? DEFAULT_MAX_EDGES,
@@ -723,12 +758,26 @@ async function exploreLocked<State, Event>(
   try {
     outer: for (let dev = nextLevel(0); dev !== undefined; dev = nextLevel(dev + 1)) {
       const level = cache.pending.get(dev)!;
+      // Within a call a level only grows deeper: deferred edges came back
+      // before the loop, and traversing an edge queues edges one step
+      // deeper. So its depths are taken in turn from the shallowest, instead
+      // of each being searched for, which made a long run quadratic.
+      let depth = Infinity;
+      let deepest = -Infinity;
+      for (const d of level.keys()) {
+        depth = Math.min(depth, d);
+        deepest = Math.max(deepest, d);
+      }
 
-      while (level.size > 0) {
-        let depth = Infinity;
-        for (const d of level.keys()) if (d < depth) depth = d;
-        const bucket = level.get(depth)!;
+      for (; level.size > 0; depth++) {
+        const bucket = level.get(depth);
+        if (bucket === undefined) {
+          // A gap between depths; past the deepest there is nothing left.
+          if (depth > deepest) throw new Error('stifinder: internal error: edges queued at a depth already explored');
+          continue;
+        }
         level.delete(depth);
+        deepest = Math.max(deepest, depth + 1);
 
         let bi = 0;
         try {
@@ -841,6 +890,7 @@ export async function exploreIteratively<State, Event>(
   cacheOrModel: StateSpaceCache<State, Event> | Model<State, Event>,
   options?: IterativeOptions,
 ): Promise<StateSpace<State, Event>> {
+  checkLimits(options);
   // A bare model gets a cache for the length of this run. Pass a cache to
   // keep it: to resume a run that hit a limit, or to analyze other budgets.
   const cache = cacheOrModel instanceof StateSpaceCache ? cacheOrModel : new StateSpaceCache(cacheOrModel);
@@ -883,13 +933,10 @@ export async function exploreIteratively<State, Event>(
     }
   }
 
-  // Guarantee a non-null lastResult even if maxDeviations < 0 (defensive).
-  if (lastResult === null) {
-    lastResult = await exploreUntil(cache, lastBudget, { maxEdges, deadline });
-  }
-
+  // `maxDeviations` is at least 0, so the loop ran at least once.
   const analysis = analyzeCache(cache, lastBudget);
-  return { ...lastResult, ...analysis, maxDeviationsReached };
+  // The last iteration's result, but the whole run's edges, as `maxEdges` counts them.
+  return { ...lastResult!, ...analysis, maxDeviationsReached, edgesAddedThisRun: cache.edgesComputed - edgesAtStart };
 }
 
 // ---------------------------------------------------------------------------
@@ -1039,7 +1086,9 @@ function findShortestViolation<State, Event>(
  * Runs a BFS over (state, cost) nodes and is independent of the cache.
  * It uses the same ordering as `analysis.violation` (fewest deviations,
  * then least non-deviation cost, then fewest steps), so on an unedited
- * analysis the two agree. Prefer `analysis.violation`; it is much cheaper.
+ * analysis the two have the same rank; of several violations that tie,
+ * they may pick different ones. Prefer `analysis.violation`; it is much
+ * cheaper.
  *
  * A violation with no steps is the initial state failing the invariant. No
  * transition leads to it and none can outrank it, so it is returned as is.
@@ -1060,9 +1109,17 @@ function shortestViolationFromTransitions<State, Event>(
   type Parent = { from: Node; event: Event; index: number } | null;
   const parents = new HashMap<Node, Parent>();
   const queue: Node[] = [];
+  // The costs each state has been reached at. A node reached at a cost no
+  // lower than one already seen for its state is skipped: anything that
+  // follows it also follows the cheaper node, and ranks strictly better
+  // there, so the result is the same. And the search ends at any budget,
+  // since with finitely many cost keys a sequence of costs in which none is
+  // at least an earlier one is finite (Dickson's lemma).
+  const seen = new HashMap<State, CostVector[]>();
 
   const root: Node = { state: initialState, cost: EMPTY_COST };
   parents.set(root, null);
+  seen.set(initialState, [EMPTY_COST]);
   queue.push(root);
 
   // Plain BFS visits nodes in depth order; among violations found, keep
@@ -1090,11 +1147,13 @@ function shortestViolationFromTransitions<State, Event>(
         continue;
       }
 
+      const costs = seen.get(t.to);
+      if (costs?.some((c) => costLE(c, cost))) continue;
+      if (costs === undefined) seen.set(t.to, [cost]);
+      else costs.push(cost);
       const successor: Node = { state: t.to, cost };
-      if (!parents.has(successor)) {
-        parents.set(successor, { from: current, event: t.event, index: t.index });
-        queue.push(successor);
-      }
+      parents.set(successor, { from: current, event: t.event, index: t.index });
+      queue.push(successor);
     }
   }
 
