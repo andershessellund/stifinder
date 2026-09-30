@@ -70,6 +70,7 @@ and checks may be synchronous or return a promise.
 - **`describeEvent(event, state)`** and **`describeState(state)`**,
   optional, say how an event and a state read in a report. A search never
   calls them: only a violation being rendered does, for its own steps.
+  **`report`**, optional, says how a violation of the model is rendered.
 
 So an error can come from three places. `applyEvent` is where the system under
 test fails *while doing something*: it threw, and there is no next state.
@@ -151,7 +152,7 @@ Code can be explored without a model of it. It asks for its decisions, and
 the search makes them:
 
 ```ts
-import { check } from 'stifinder';
+import { check, decisionModel } from 'stifinder';
 
 // The code under test: send, and on failure try again, up to `attempts` times.
 function deliver(message: string, send: (message: string) => boolean, attempts: number): boolean {
@@ -160,55 +161,53 @@ function deliver(message: string, send: (message: string) => boolean, attempts: 
 }
 
 it('delivers unless every attempt fails', async () => {
-  await check(
-    (decide) => {
-      const send = () =>
-        decide.choose([
-          { value: true, label: 'send succeeds' },
-          { value: false, label: 'send fails', cost: ['fault'] },
-        ]);
-      if (!deliver('hello', send, 3)) throw new Error('gave up');
-    },
-    { baseBudget: { fault: 2 } },
-  );
+  const model = decisionModel((decide) => {
+    const send = () => !decide.maybe('the send fails', { cost: ['fault'] });
+    if (!deliver('hello', send, 3)) throw new Error('gave up');
+  });
+  await check(model, { baseBudget: { fault: 2 } });
 });
 ```
 
-The body is a function of a `Decisions` object. **`decide.choose(alternatives)`**
-picks one of them and returns its value; the first is what is expected to
-happen, and any other is a deviation, charging the cost keys it lists.
-**`decide.integer(range, label?)`** picks a number below `range`, 0 being the
-expected one, with `label` saying in words what another pick means. That is
-how the rest of a system's nondeterminism gets in: a test double that asks
-whether to pause, whether to drop the message, which reply arrives.
+The body is a function of a `Decisions` object, and `decisionModel` makes
+a `Model` of it. **`decide.maybe(label, { cost })`** asks whether something
+happens that is not expected to: `false` unless the search is exploring
+that deviation, which charges the cost keys given. **`decide.choose(
+alternatives)`** picks one of several values, the first being the expected
+one, each with a label and cost keys of its own. **`decide.integer(range,
+label?)`** picks a number below `range`, 0 being expected; its label says in
+words what another pick means, so it suits a yes-or-no, and `choose` suits
+the rest. That is how the rest of a system's nondeterminism gets in: a test
+double that asks whether to pause, whether to drop the message, which reply
+arrives.
 
 The search runs the body once per decision sequence worth trying, fewest
-deviations first. Where the body throws, `check` rejects with the report:
+deviations first. Where the body throws, `check` rejects with the report;
 without the budget above, that is
 
 ```
 gave up
 3 deviations, 3 steps, fault: 3
-  1. send fails  (deviation, fault)
-  2. send fails  (deviation, fault)
-  3. send fails  (deviation, fault)
+  1. the send fails  (deviation, fault)
+  2. the send fails  (deviation, fault)
+  3. the send fails  (deviation, fault)
 in state: decisions [1, 1, 1]
 ```
 
-For a body the report lists the deviations alone, since the expected steps
-have no words of their own, and ends with the decisions that led there:
-**`runOnce(body, [1, 1, 1])`** runs the body once more with exactly those,
-under a debugger if you like.
+A body's report lists the charged steps alone, since the expected steps
+have no words of their own. The decisions that led there are
+**`decisionsOf(error)`**, and **`runOnce(body, error)`** runs the body once
+more with exactly those, under a debugger if you like.
 
 Two requirements. The body must make the same decisions given the same
-answers, since it is run again for every prefix; one whose decisions
-change between runs is rejected. And it must not go on deciding after it
-has returned, or after the promise it returned has settled. A body that
-throws before its first decision, or on the expected run, fails like any
-other, and a rejected promise is the body's failure.
-
-**`decisionModel(body)`** is the `Model` behind this, for use with the
-rest of the API, and says how many times the body has `runs`.
+answers, since it is run again for every prefix; one whose decisions change
+between runs is rejected. And one run of it must end: past `maxDecisions`
+(10,000 unless `decisionModel` is told otherwise) it is cut off, since no
+limit of the search can interrupt a run. Either, or a wrong use of
+`Decisions`, is a **`DecisionsError`**, never a violation: the search rejects
+with it, whatever the body does with it. A body that throws before its first
+decision, or on the expected run, fails like any other, and a rejected
+promise is the body's failure.
 
 ## Reading a result
 
@@ -345,19 +344,24 @@ six.
   rejects with a `ViolationError` if there is a violation, and with an
   `IncompleteError` if a limit cut the search short before one was found
   (unless `incomplete: 'allow'`). Otherwise it resolves with the
-  `StateSpace`. See [In a test](#in-a-test). **`check(body, options?)`**
-  does the same for a body of code, through the decisions it asks for; see
-  [Code that decides](#code-that-decides).
-- **`decisionModel(body)`** is that body as a `Model<DecisionState, number>`,
-  where a state is the decisions made so far and an event the next one, with
-  `runs`, how many times the body has been run. **`runOnce(body, decisions)`**
-  runs it once with those decisions, and 0 for every one after.
-- **`formatViolation(violation, model?)`** renders a violation as text: the
-  error, what the path cost, each step with what it was charged besides the
-  step itself, and the state that failed a check. It uses the model's
-  `describeEvent` and `describeState` where there are any; without them a
-  string is shown as it is and anything else as JSON. The text is for
-  people, and its wording is not API.
+  `StateSpace`. See [In a test](#in-a-test).
+- **`decisionModel(body, options?)`** is a body of code as a
+  `Model<DecisionState, number>`, where a state is the decisions made so far
+  and an event the next one; see [Code that decides](#code-that-decides).
+  `options` are `maxDecisions`, the most one run may make, and `report`. The
+  model has `runs`, how many times the body has been run, by every search
+  of it. **`decisionsOf(violation)`** gives the decisions of a violation of
+  such a model, from the path or a `ViolationError`; **`runOnce(body,
+  decisions)`** runs the body once with those, or with a violation's, and 0
+  for every decision after.
+- **`formatViolation(violation, model?, options?)`** renders a violation as
+  text: the error, what the path cost, each step with what it was charged
+  besides the step itself, and the state that failed a check. It uses the
+  model's `describeEvent` and `describeState` where there are any; without
+  them a string is shown as it is and anything else as JSON. With `{ steps:
+  'charged' }`, from `options` or the model's own `report`, only the steps
+  charged something are listed. The text is for people, and its wording is
+  not API.
 - **`exploreIteratively(cacheOrModel, options?)`** calls `explore` with
   deviation budgets 0, 1, 2, … up to `maxDeviations`, stopping at the first
   budget that exhibits a violation (unless `stopOnViolation: false`) or once
@@ -404,7 +408,7 @@ whichever it is.
 | `maxDeviations` | iterative | `100` | deepest deviation budget tried; `Infinity` for no cap |
 | `stopOnViolation` | iterative | `true` | stop at the first failing budget |
 | `incomplete` | `check` | `'throw'` | what a search cut short by a limit does when it found nothing: reject, or with `'allow'` resolve |
-| `report` | `check` | | how a `ViolationError` renders the violation: `{ steps: 'all' }` or `{ steps: 'deviations' }`, the latter the default for a body |
+| `report` | `check` | the model's own | how a `ViolationError` renders the violation: `{ steps: 'all' }` or `{ steps: 'charged' }`, the latter what `decisionModel` asks for |
 
 A run that hits a limit reports `completed: false` and leaves the cache
 consistent; the next `explore` on it picks up where it stopped. A callback

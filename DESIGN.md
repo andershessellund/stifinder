@@ -71,9 +71,9 @@ declarations (`stripInternal`), so the types a consumer sees are the API
 
 ### 2.1 What a model is
 
-A `Model<State, Event>` is seven things, the last four optional. The
+A `Model<State, Event>` is eight things, the last five optional. The
 callbacks and checks may return their result or a promise of it (D9); the
-two descriptions return a string.
+two descriptions return a string, and `report` is a value.
 
 | Part | What it says |
 | --- | --- |
@@ -84,6 +84,7 @@ two descriptions return a string.
 | `terminalInvariant(state)` | the same, for a state where nothing more can happen |
 | `describeEvent(event, state)` | how an event reads where it is taken, for a report |
 | `describeState(state)` | how a state reads, for a report |
+| `report` | how a violation of the model is rendered, unless the caller says otherwise |
 
 ### 2.2 Callbacks are pure, and each result is kept
 
@@ -413,30 +414,36 @@ and the model's error as `cause`. An `IncompleteError` says which limit
 stopped the search, how many edges it had computed, and the highest
 deviation budget it completed.
 
-With `steps: 'deviations'` the report lists only the steps charged
-something besides the step itself, under their own numbers. It is the
-default for a body (§9.3), whose expected steps have no words of their own.
+With `steps: 'charged'` the report lists only the steps charged something
+besides the step itself, under their own numbers. The options come from
+the caller, or else from the model's own `report`: a body's model asks for
+the charged steps (§9.3), since its expected steps have no words of their
+own, so a violation of it reads the same however it is rendered.
 
 ### 9.3 Code that decides
 
-`decisionModel(body)` makes a `Model` of a function of a `Decisions`
-object, which the body asks at each point where more than one thing could
-happen: `integer(range, label?)` for a number below `range`, `choose(
-alternatives)` for one of several values, each with a label and cost keys
-of its own. The first pick is the expected one; any other is a deviation.
-A range of 1, or a single alternative, is no decision.
+`decisionModel(body, options?)` makes a `Model` of a function of a
+`Decisions` object, which the body asks at each point where more than one
+thing could happen: `maybe(label, { cost })` whether something unexpected
+happens, `choose(alternatives)` which of several values, each with a label
+and cost keys of its own, `integer(range, label?)` which number below
+`range`. The first pick is the expected one; any other is a deviation, and
+charges the cost keys of its alternative (the first alternative's are
+charged on the expected run). A range of 1, or a single alternative, is no
+decision.
 
 - **A state is the decisions made so far**, an interned array of picks. It
   is opaque to a caller (`DecisionState`); `describeState` renders it as
-  `decisions [0, 0, 1]`, and the events of a violation's steps are the
-  picks. **An event is the next pick.**
+  `decisions [0, 0, 1]`, and `decisionsOf` gives the picks of a violation,
+  from its steps' events. **An event is the next pick.**
 - **`applyEvent(prefix, k)`** is `prefix + [k]`, and computes nothing.
 - **A run is made when a state is first asked about**, by `invariant` or
   `getEvents`: the body runs with the state's picks replayed and 0
-  answered to every decision after them. That run reaches, and records,
-  every state along its default continuation: what each decides, or that it
-  ends there, or the error it throws. So the body runs once per leaf of the
-  decision tree, and no state is reached twice.
+  answered to every decision after them. That run reaches, and records on
+  the model, every state along its default continuation: what each
+  decides, or that it ends there, or the error it throws. So the body runs
+  once per leaf of the decision tree, no state is reached twice, and a
+  second search of the same model reruns nothing.
 - **A failure is a fact about the state the run reached**, reported by
   `invariant`. The initial state is checked like any other, so a body that
   throws before its first decision fails there, with no steps.
@@ -444,20 +451,30 @@ A range of 1, or a single alternative, is no decision.
   body's failure. The body is told nothing of the search; it must decide
   the same way given the same answers, and must not decide after it has
   returned or settled.
-- **Determinism is checked** where a run replays a decision: the number of
-  alternatives must be what it was when the decision was first met, and a
-  run must make at least as many decisions as it replays. A wrong use of
-  `Decisions` (a range below 1, no alternatives) is an error of the harness,
-  thrown through the body and never taken for its failure.
-- **Labels** are how a pick reads: an alternative's own, or `integer`'s
-  label for a pick that is not 0 (a function is given the pick; words get
-  the pick added above two alternatives), and the pick itself otherwise.
+- **A `DecisionsError` is the test's error, never the body's failure**: a
+  wrong use of `Decisions` (a range below 1, no alternatives, a replayed
+  pick the body does not offer), a body whose decisions have changed (a
+  replayed decision has other alternatives than it had, or a run makes
+  fewer decisions than it replays), or a run past `maxDecisions` (10,000
+  by default), which is what keeps a body whose expected run never ends
+  from hanging the search, since no limit of the search can interrupt a
+  run. The first such error is kept by the run's `Decisions`, thrown by
+  every later decision, and recorded on the state once the body is done,
+  whatever the body did with it. `invariant` reports nothing for such a
+  state, and `getEvents`, which the search calls right after, throws it:
+  the one callback whose throw the search does not take for an error of
+  the model (§5), so `check` rejects with it, at once, and the next search
+  meets it again.
+- **Labels** are how a pick reads: an alternative's own, or `maybe`'s and
+  `integer`'s label for a pick that is not 0 (a function is given the
+  pick; words get the pick added above two alternatives), and the pick
+  itself otherwise.
+- **The model's `report`** asks for the charged steps alone (§9.2).
 
-`check(body)` is `check(decisionModel(body))` with the report showing the
-deviations alone. `runOnce(body, decisions)` runs the body once with those
-decisions replayed, for seeing a reported failure again; a decision the
-body does not offer, or more decisions than it makes, is an error. Why:
-D36, D37.
+`runOnce(body, decisions)` runs the body once with those decisions
+replayed, or with a violation's, for seeing a reported failure again; a
+decision the body does not offer, or more decisions than it makes, is a
+`DecisionsError`. Why: D36, D37.
 
 ---
 
@@ -489,7 +506,7 @@ types.
 | `src/search.ts` | the model, cost helpers, `StateSpaceCache`, `explore`, `analyzeCache`, `exploreIteratively`, `exploreOnce`, `shortestViolation` |
 | `src/report.ts` | `formatViolation`, `ViolationError`, `IncompleteError` |
 | `src/check.ts` | `check` |
-| `src/decisions.ts` | `Decisions`, `decisionModel`, `runOnce` |
+| `src/decisions.ts` | `Decisions`, `decisionModel`, `decisionsOf`, `runOnce`, `DecisionsError` |
 | `src/index.test.ts` | behaviour and regressions of the search |
 | `src/report.test.ts`, `src/check.test.ts`, `src/decisions.test.ts` | the report, the verdict, and code that decides |
 | `src/oracle.test.ts` | the brute-force oracle (§10) |
