@@ -4,10 +4,10 @@
 // ---------------------------------------------------------------------------
 
 import { DEVIATIONS_KEY, STEPS_KEY } from './search.js';
-import type { CostVector, Model, ViolationPath } from './search.js';
+import type { CostVector, FormatOptions, Model, ViolationPath } from './search.js';
 
-/** The part of a model a report asks: how an event and a state read. */
-type Describers<State, Event> = Pick<Model<State, Event>, 'describeEvent' | 'describeState'>;
+/** The part of a model a report asks: how an event and a state read, and how it wants to be rendered. */
+type Describers<State, Event> = Pick<Model<State, Event>, 'describeEvent' | 'describeState' | 'report'>;
 
 /** A value shown as it is: a string plainly, anything else as JSON. */
 function plain(value: unknown): string {
@@ -83,15 +83,19 @@ const hanging = (text: string, width: number) => text.replaceAll('\n', `\n${' '.
  * A step is followed by what it was charged besides the step itself: a
  * deviation, and any of the model's own cost keys. Events and the failing
  * state are described by `model.describeEvent` and `model.describeState`
- * where the model has them, and shown as they are where it does not.
+ * where the model has them, and shown as they are where it does not. With
+ * `steps: 'charged'`, only the steps charged something are listed. The
+ * model's own `report` says how it is rendered unless `options` does.
  *
  * The text is for people. Its wording and layout may change in any release.
  */
 export function formatViolation<State, Event>(
   violation: ViolationPath<State, Event>,
   model: Describers<State, Event> = {},
+  options?: FormatOptions,
 ): string {
   const { steps } = violation;
+  const listed = options?.steps ?? model.report?.steps ?? 'all';
   const lines = [errorText(violation.error)];
   lines.push(steps.length === 0 ? 'no steps: the initial state fails' : costText(violation.cost));
 
@@ -99,6 +103,7 @@ export function formatViolation<State, Event>(
   for (const [i, step] of steps.entries()) {
     const after = steps[i + 1]?.cost ?? violation.cost;
     const charged = chargedText(step.cost, after, step.index);
+    if (listed === 'charged' && charged === '') continue;
     const event = described(model.describeEvent && (() => model.describeEvent?.(step.event, step.state)), step.event);
     const prefix = `  ${String(i + 1).padStart(width)}. `;
     lines.push(`${prefix}${hanging(event, prefix.length)}${charged === '' ? '' : `  (${charged})`}`);
@@ -121,8 +126,8 @@ export class ViolationError<State = unknown, Event = unknown> extends Error {
   /** The violation: its steps, cost, error, and `badState` if a state failed a check. */
   readonly violation: ViolationPath<State, Event>;
 
-  constructor(violation: ViolationPath<State, Event>, model?: Describers<State, Event>) {
-    super(formatViolation(violation, model), { cause: violation.error });
+  constructor(violation: ViolationPath<State, Event>, model?: Describers<State, Event>, options?: FormatOptions) {
+    super(formatViolation(violation, model, options), { cause: violation.error });
     this.name = 'ViolationError';
     this.violation = violation;
   }

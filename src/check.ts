@@ -5,7 +5,7 @@
 
 import { IncompleteError, ViolationError } from './report.js';
 import { StateSpaceCache, exploreIteratively } from './search.js';
-import type { IterativeOptions, Model, StateSpace } from './search.js';
+import type { FormatOptions, IterativeOptions, Model, StateSpace } from './search.js';
 
 export interface CheckOptions extends IterativeOptions {
   /**
@@ -14,6 +14,9 @@ export interface CheckOptions extends IterativeOptions {
    * default), or resolve with `completed: false` (`'allow'`).
    */
   incomplete?: 'throw' | 'allow';
+  /** How a `ViolationError` renders the violation, over what the model's
+   *  own `report` says. */
+  report?: FormatOptions;
 }
 
 /**
@@ -27,6 +30,8 @@ export interface CheckOptions extends IterativeOptions {
  * A search that resolves has cleared its budget. It has cleared the model
  * only if the result is `exhaustive`: a test that means a proof asserts
  * that too.
+ *
+ * A body of code is checked as `check(decisionModel(body))`.
  */
 export async function check<State, Event>(
   subject: StateSpaceCache<State, Event> | Model<State, Event>,
@@ -38,7 +43,7 @@ export async function check<State, Event>(
   }
   const space = await exploreIteratively(subject, options);
   if (space.violation !== null) {
-    throw new ViolationError(space.violation, subject instanceof StateSpaceCache ? subject.model : subject);
+    throw new ViolationError(space.violation, subject instanceof StateSpaceCache ? subject.model : subject, options?.report);
   }
   if (!space.completed && incomplete === 'throw') throw new IncompleteError(space);
   return space;

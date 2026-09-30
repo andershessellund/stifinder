@@ -550,8 +550,8 @@ is a required check, are under Open.
 
 Settled in the design discussion of 2026-09-30, from two users of
 stifinder: kilde's `kilde/testing`, and the Durable Object simulator
-stifinder was extracted from. D28, D34 and D35 are built. The rest is not:
-see Open.
+stifinder was extracted from. D28 and D34 to D37 are built. The rest is
+not: see Open.
 
 ### D27. stifinder owns the test-facing layer; simulators stay with their systems
 
@@ -617,7 +617,9 @@ though it is only the fewest deviations it guarantees (D10). Tests:
 ### D35. A report lists every step, in the model's words, with what each was charged
 
 `formatViolation` gives the error first, then the cost of the path, then
-one line per step, then the state that failed. Its text is not API.
+one line per step, then the state that failed. Its text is not API. A model
+may say how it is to be rendered, with `report`, and a caller's options
+come over that.
 
 **Why.** Each user had written this by hand: the dining philosophers
 example, kilde's list of deviations, the simulator's trace. The error comes
@@ -628,9 +630,134 @@ by differencing the costs of neighbouring steps (D20). The wording is left
 free, as the text of an error message already is (D23). **Evidence.** The
 example's own report was a dozen lines of formatting and is two
 describers; its output, which the README quotes, is the library's.
-**Cost.** Every step is a line, so a long path is a long message. A view of
-the deviations alone, which is what kilde prints, is under Open with the
-harness that needs it. Tests: `formatViolation`. DESIGN.md §9.2.
+**Rejected:** the view of a report as a property of the call, the first
+form: `check(body)` rendered the charged steps alone and
+`check(decisionModel(body))` every step, for one model, and the docs had
+to say so. An external review of 2026-09-30 put the default where the
+model is (a body's expected steps have no words of their own, which is a
+fact about the model), so that a violation reads the same however it is
+rendered. The same review renamed the view from `'deviations'` to
+`'charged'`: a first alternative may list a cost key, and the view keeps
+that step too. **Cost.** Every step is a line, so a long path is a long
+message. Tests: `formatViolation`, and "the model asks for the charged
+steps alone in its report". DESIGN.md §9.2.
+
+### D36. A body is explored through its decisions: the state is the decisions so far, and one run harvests a chain
+
+`decisionModel(body, options?)` is the move of kilde's adapter. A state is
+the picks made so far, an event the next pick, and a run of the body with a
+state's picks replayed and 0 answered after them records every state along
+that default continuation. A run's failure is reported by `invariant` on
+the state it reached, a promise the body returns is awaited, and a run is
+cut off past `maxDecisions`, 10,000 by default, which is a violation on the
+state the run was for.
+
+**Why.** JavaScript cannot capture a continuation, so a body can only be
+put back into a state by running it there again, and the decisions it made
+are what it takes to do that. Recording the whole default continuation of a
+run means the body runs once per leaf of its decision tree, which is
+exactly the count of a depth-first enumeration: kilde's experiment of
+2026-09-13 measured the same 2,287 runs on its suite of 92 tests under
+both, and twice the time, from about 5 µs of search per edge against a body
+of 30 µs. **Rejected:** stopping a run at the first decision it has no
+answer for, which runs the body once per edge instead. **Rejected:** kilde's
+two ways of reporting a failure, both defects. It reported a run's error on
+the edge into the state the run reached, so a body that throws before its
+first decision, which reaches only the initial state, passed as exhaustive;
+seven of kilde's own tests give it an empty source, and the one of them
+checked consults no decision, so its assertions cannot fail. And it did not
+await a body's promise, so an async body's rejection escaped
+as unhandled and the body passed. `invariant` covers the initial state
+(D5), and awaiting is what the callbacks already do (D9). Tests: `a body of
+code, explored through its decisions` › "a body that throws before its
+first decision fails at the initial state", "a body that returns a promise
+is awaited, and its rejection is its failure". **Cost.** No state is
+reached twice, so the cache's sharing of states does nothing here, and the
+space is the tree of decision sequences, exponential in their length; a
+step allowance bounds it (D31). The body must be deterministic, and is told
+nothing of the search: the harness checks what it can, that a replayed
+decision has the alternatives it had, and that a run makes the decisions it
+replays. No limit of the search can interrupt a run, since a run is one
+call of one callback, so a body that keeps deciding would hang the search;
+`maxDecisions` is what cuts it off (found in the external review of
+2026-09-30), and a run that loops or waits without deciding is beyond any
+limit. **Rejected:** the cut-off as a `DecisionsError`, the first form. A
+run that does not end under its schedule is a fact about the body: after a
+deviation it is a livelock the search has found, and reported as "the test
+is wrong" it came with no path to it (an independent review, the same
+day). It is a violation on the state the run was for, so the path is the
+prefix and not ten thousand zeros, and `runOnce` replays it. A state is a
+value the caller cannot look into (`DecisionState`), which leaves its form
+free: merging states by a fingerprint of the world at a decision, if a body
+can give one, is under
+Open; `decisionsOf` gives the decisions of a violation from its steps'
+events, which stay the picks whatever a state becomes. DESIGN.md §9.3.
+
+### D37. `Decisions` is `maybe`, `choose` and kilde's `integer`; its errors are never the body's failure
+
+A decision is `maybe(label, { cost })`, whether something unexpected
+happens; `choose(alternatives)`, each alternative a value with a label and
+cost keys; or `integer(range, label?)`, a number below `range`. A wrong use
+of any, a body that is not deterministic, or a decision made once the run
+is over is a `DecisionsError`, with which the search rejects. A body is
+checked as `check(decisionModel(body))`; `check` takes no body.
+
+**Why.** An alternative maps one to one onto an `EventDescriptor`: its
+position is the index, and so the deviation, and its keys are the event's
+cost. That gives a body the fault budgets a model has (D4): "at most one
+lost send". `maybe` is the common case, a fault with a cost key, in one
+call; `choose` any other, with `const` inference so that the value comes
+back as the union of the alternatives' values. `integer(range, label)`
+keeps the signature of kilde's oracle, so its test doubles, which take an
+`{ oracle }` with that one method, work against a `Decisions` unchanged.
+The report of a body lists the charged steps alone (D35), and
+`decisionsOf(error)` gives the decisions, which `runOnce(body, error)`
+takes to run the failure again under a debugger; kilde printed them, and
+offered no way to replay.
+
+A `DecisionsError` is the test being wrong, not the code under it, and a
+violation would say the opposite. It says which run's decisions it happened
+at, since the harness knows them and the user otherwise could not find the
+run. It escapes the search by way of
+`getEvents`, the one callback whose throw the search does not take for an
+error of the model: the run keeps the first such error, throws it again at
+every later decision, and records it on the state once the body is done,
+whatever the body did with it; `invariant` reports nothing for that state,
+and `getEvents`, called on it right after, throws. That asymmetry between
+`getEvents` and the other callbacks is now load-bearing, so it is stated in
+`getEvents`'s doc and the README, and pinned by a test in the search suite
+("is an error of the model from applyEvent and the checks, and the failure
+of the search from getEvents"). A decision made once the run is over, from
+work the body left running, is thrown to that work and remembered by the
+model, which throws it at the next state a search asks the model about: the
+one way left to misuse `Decisions` without being told, which the review's
+second round found. A kept cache that already holds everything asks
+nothing, and is not told; that is documented rather than closed, since
+closing it would mean `check` knowing this one kind of model. The body is
+called through an async function, so that one that throws before returning
+takes the tick one that returns does, and the microtasks it queued fall on
+the same side of the run's end either way (the independent review).
+`runOnce` has the same cap as a search, since a debugging helper that hangs
+is worse than one that errors. **Rejected:** `integer(range, label, { cost
+})`, so that kilde's doubles could charge a fault key. For two alternatives
+it is `maybe`; above two, every deviation charging the same keys is the
+narrow case `choose` already covers with keys of its own per alternative.
+
+**Rejected:** `check(body)`, an overload on `typeof subject === 'function'`,
+the first form. A zero-argument function that returns a model type-checks
+as a body, since a body may return anything; `check(makeModel)` for
+`check(makeModel())` then ran the factory as a body that decides nothing,
+and passed as exhaustive. The harness also needs options of its own
+(`maxDecisions`, `report`), which belong on `decisionModel`, not on
+`check`. **Rejected:** throwing a misuse through the body and no further,
+the first form. Every run happens inside `invariant`, whose throw the cache
+records as `{ error }`; so a misuse came out as a `ViolationError` with a
+path, a body that caught it hid it, and a test pinned that as intended.
+Both were found in the external review of 2026-09-30. **Cost.** A label
+for `integer` and `maybe` says what a pick other than 0 means, as kilde's
+did, so a full report reads "the send fails: no" for the expected pick;
+`choose` names every alternative. Tests: `a DecisionsError is the test
+being wrong, and never a violation`. DESIGN.md §9.3.
 
 ### D29. Notes reach the recorder through an argument
 
@@ -649,7 +776,8 @@ argument to where its notes are made.
 ### D30. One entry point
 
 Everything is exported from `stifinder`. Behind it the source is modules,
-the search, the report and `check`, which the entry point exports whole.
+the search, the report, `check` and the decisions, which the entry point
+exports whole.
 
 **Why.** stifinder is a testing tool throughout, and the harness adds no
 dependency. The test entry takes a model, a cache or a body, so the root
@@ -676,13 +804,14 @@ every name is provisional.
 - `findPath(cache, where)`: the shortest path to a state that satisfies a
   predicate, for "no state where" and for "some state where". From the
   cache, which holds every arrival with its predecessor (D31).
-- `check(body)`, and a view of a report that lists the deviations alone.
-  Both come with the decision harness.
-- The decision harness moved from kilde: an oracle with `integer`, a
-  `choose` whose alternatives carry cost keys, and `note`; a model built
-  from a body; a single run of a given decision sequence. Two defects in
-  kilde's version must not come along: a body that throws before its first
-  decision passes as exhaustive, and an async body is not awaited.
+- A scheduler over `Decisions` for bodies with several tasks, which picks
+  the task to run next and settles between picks. The two that exist have
+  no user but a self-test (D27).
+- `decide.note(text)` on `Decisions`, the body's way to the recorder
+  (D29), shown by the report of a failing run.
+- Merging the states of a body by a fingerprint of the world at a decision,
+  where a body can give one, so that a state reached by two decision
+  sequences is explored once (D36). Nothing needs it at kilde's sizes.
 - `settle()`: resolves once the microtask queue has drained.
 - An `optional` mark on an event, so that `terminalInvariant` also runs
   where every event is optional, if a fault offered alone should be

@@ -70,6 +70,7 @@ and checks may be synchronous or return a promise.
 - **`describeEvent(event, state)`** and **`describeState(state)`**,
   optional, say how an event and a state read in a report. A search never
   calls them: only a violation being rendered does, for its own steps.
+  **`report`**, optional, says how a violation of the model is rendered.
 
 So an error can come from three places. `applyEvent` is where the system under
 test fails *while doing something*: it threw, and there is no next state.
@@ -144,6 +145,80 @@ it('the table never deadlocks', async () => {
 
 Otherwise it resolves with the result. That is a search that cleared its
 budget, which is not yet a proof: the table below says what is.
+
+## Code that decides
+
+Code can be explored without a model of it. It asks for its decisions, and
+the search makes them:
+
+```ts
+import { check, decisionModel } from 'stifinder';
+
+// The code under test: send, and on failure try again, up to `attempts` times.
+function deliver(message: string, send: (message: string) => boolean, attempts: number): boolean {
+  for (let i = 0; i < attempts; i++) if (send(message)) return true;
+  return false;
+}
+
+it('delivers unless every attempt fails', async () => {
+  const model = decisionModel((decide) => {
+    const send = () => !decide.maybe('the send fails', { cost: ['fault'] });
+    if (!deliver('hello', send, 3)) throw new Error('gave up');
+  });
+  await check(model, { baseBudget: { fault: 2 } });
+});
+```
+
+The body is a function of a `Decisions` object, and `decisionModel` makes
+a `Model` of it. **`decide.maybe(label, { cost })`** asks whether something
+happens that is not expected to: `false` unless the search is exploring
+that deviation, which charges the cost keys given. **`decide.choose(
+alternatives)`** picks one of several values, the first being the expected
+one, each with a label and cost keys of its own. **`decide.integer(range,
+label?)`** picks a number below `range`, 0 being expected; its label says in
+words what another pick means, so it suits a yes-or-no, and `choose` suits
+the rest. That is how the rest of a system's nondeterminism gets in: a test
+double that asks whether to pause, whether to drop the message, which reply
+arrives.
+
+The search runs the body once per decision sequence worth trying, fewest
+deviations first. Where the body throws, `check` rejects with the report;
+without the budget above, that is
+
+```
+gave up
+3 deviations, 3 steps, fault: 3
+  1. the send fails  (deviation, fault)
+  2. the send fails  (deviation, fault)
+  3. the send fails  (deviation, fault)
+in state: decisions [1, 1, 1]
+```
+
+A body's report lists the charged steps alone, since the expected steps
+have no words of their own. The decisions that led there are
+**`decisionsOf(error)`**, and **`runOnce(body, error)`** runs the body once
+more with exactly those, under a debugger if you like.
+
+A run that keeps deciding is cut off past `maxDecisions` (10,000, unless
+`decisionModel` is told otherwise; `Infinity` for no cap), and that is a
+violation like any other, on the state the run was for: the body does not
+end under that schedule. Found after a deviation, it is a livelock the
+search has caught; on the expected run, it is the body. No limit of the
+search can interrupt a run, so a run that loops, or waits, *without*
+deciding is not cut off by anything.
+
+Two requirements. The body must make the same decisions given the same
+answers, since it is run again for every prefix; one whose decisions change
+between runs is rejected. And work the body leaves running, unawaited, must
+not decide: once the body has returned, or its promise has settled, no run
+could replay a decision. Either, or a wrong use of `Decisions`, is a
+**`DecisionsError`**, never a violation: the search rejects with it,
+whatever the body does with it, and it says which run's decisions it
+happened at. A decision made late is thrown to the work that made it, and
+remembered by the model, which rejects the next state a search asks it
+about (a kept cache that already holds everything asks nothing). A body
+that throws before its first decision, or on the expected run, fails like
+any other, and a rejected promise is the body's failure.
 
 ## Reading a result
 
@@ -281,12 +356,23 @@ six.
   `IncompleteError` if a limit cut the search short before one was found
   (unless `incomplete: 'allow'`). Otherwise it resolves with the
   `StateSpace`. See [In a test](#in-a-test).
-- **`formatViolation(violation, model?)`** renders a violation as text: the
-  error, what the path cost, each step with what it was charged besides the
-  step itself, and the state that failed a check. It uses the model's
-  `describeEvent` and `describeState` where there are any; without them a
-  string is shown as it is and anything else as JSON. The text is for
-  people, and its wording is not API.
+- **`decisionModel(body, options?)`** is a body of code as a
+  `Model<DecisionState, number>`, where a state is the decisions made so far
+  and an event the next one; see [Code that decides](#code-that-decides).
+  `options` are `maxDecisions`, the most one run may make, and `report`. The
+  model has `runs`, how many times the body has been run, by every search
+  of it. **`decisionsOf(violation)`** gives the decisions of a violation of
+  such a model, from the path or a `ViolationError`; **`runOnce(body,
+  decisions)`** runs the body once with those, or with a violation's, and 0
+  for every decision after.
+- **`formatViolation(violation, model?, options?)`** renders a violation as
+  text: the error, what the path cost, each step with what it was charged
+  besides the step itself, and the state that failed a check. It uses the
+  model's `describeEvent` and `describeState` where there are any; without
+  them a string is shown as it is and anything else as JSON. With `{ steps:
+  'charged' }`, from `options` or the model's own `report`, only the steps
+  charged something are listed. The text is for people, and its wording is
+  not API.
 - **`exploreIteratively(cacheOrModel, options?)`** calls `explore` with
   deviation budgets 0, 1, 2, … up to `maxDeviations`, stopping at the first
   budget that exhibits a violation (unless `stopOnViolation: false`) or once
@@ -333,11 +419,16 @@ whichever it is.
 | `maxDeviations` | iterative | `100` | deepest deviation budget tried; `Infinity` for no cap |
 | `stopOnViolation` | iterative | `true` | stop at the first failing budget |
 | `incomplete` | `check` | `'throw'` | what a search cut short by a limit does when it found nothing: reject, or with `'allow'` resolve |
+| `report` | `check` | the model's own | how a `ViolationError` renders the violation: `{ steps: 'all' }` or `{ steps: 'charged' }`, the latter what `decisionModel` asks for |
 
 A run that hits a limit reports `completed: false` and leaves the cache
-consistent; the next `explore` on it picks up where it stopped. A callback
-that throws leaves it just as consistent: the call rejects, and the next one
-meets the same throw.
+consistent; the next `explore` on it picks up where it stopped. A throw
+from `applyEvent`, `invariant` or `terminalInvariant` is an error of the
+model, and a violation like any other. A throw from `getEvents` is not: it
+is the search that fails. The call rejects with it, the cache is left just
+as consistent, and the next call meets the same throw. That is how a model
+says the test itself is wrong, as `decisionModel` does with a
+`DecisionsError`.
 
 Budgets are accepted as plain objects or as canonical `ValueMap<string,
 number>` values (`BudgetVector`); `toBudget` normalizes either form.

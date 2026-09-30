@@ -71,9 +71,9 @@ declarations (`stripInternal`), so the types a consumer sees are the API
 
 ### 2.1 What a model is
 
-A `Model<State, Event>` is seven things, the last four optional. The
+A `Model<State, Event>` is eight things, the last five optional. The
 callbacks and checks may return their result or a promise of it (D9); the
-two descriptions return a string.
+two descriptions return a string, and `report` is a value.
 
 | Part | What it says |
 | --- | --- |
@@ -84,6 +84,7 @@ two descriptions return a string.
 | `terminalInvariant(state)` | the same, for a state where nothing more can happen |
 | `describeEvent(event, state)` | how an event reads where it is taken, for a report |
 | `describeState(state)` | how a state reads, for a report |
+| `report` | how a violation of the model is rendered, unless the caller says otherwise |
 
 ### 2.2 Callbacks are pure, and each result is kept
 
@@ -269,6 +270,12 @@ edges deferred during the call go to `deferred`, whether the call returns,
 hits a limit or rejects. The next call resumes after a limit, and meets the
 same throw after a throw.
 
+**Only `getEvents` can make a call reject.** A throw from `applyEvent`,
+`invariant` or `terminalInvariant` is recorded as that edge's or state's
+error (§2.4). A throw from `getEvents` is not caught: it is the model
+saying that the test is wrong, not that the system is, and `decisionModel`
+relies on it (§9.3, D37). That difference is API, and a test pins it.
+
 ---
 
 ## 6. Reading the cache
@@ -413,6 +420,86 @@ and the model's error as `cause`. An `IncompleteError` says which limit
 stopped the search, how many edges it had computed, and the highest
 deviation budget it completed.
 
+With `steps: 'charged'` the report lists only the steps charged something
+besides the step itself, under their own numbers. The options come from
+the caller, or else from the model's own `report`: a body's model asks for
+the charged steps (§9.3), since its expected steps have no words of their
+own, so a violation of it reads the same however it is rendered.
+
+### 9.3 Code that decides
+
+`decisionModel(body, options?)` makes a `Model` of a function of a
+`Decisions` object, which the body asks at each point where more than one
+thing could happen: `maybe(label, { cost })` whether something unexpected
+happens, `choose(alternatives)` which of several values, each with a label
+and cost keys of its own, `integer(range, label?)` which number below
+`range`. The first pick is the expected one; any other is a deviation, and
+charges the cost keys of its alternative (the first alternative's are
+charged on the expected run). A range of 1, or a single alternative, is no
+decision.
+
+- **A state is the decisions made so far**, an interned array of picks. It
+  is opaque to a caller (`DecisionState`); `describeState` renders it as
+  `decisions [0, 0, 1]`, and `decisionsOf` gives the picks of a violation,
+  from its steps' events. **An event is the next pick.**
+- **`applyEvent(prefix, k)`** is `prefix + [k]`, and computes nothing.
+- **A run is made when a state is first asked about**, by `invariant` or
+  `getEvents`: the body runs with the state's picks replayed and 0
+  answered to every decision after them. That run reaches, and records on
+  the model, every state along its default continuation: what each
+  decides, or that it ends there, or the error it throws. So the body runs
+  once per leaf of the decision tree, no state is reached twice, and a
+  second search of the same model reruns nothing.
+- **A failure is a fact about the state the run reached**, reported by
+  `invariant`. The initial state is checked like any other, so a body that
+  throws before its first decision fails there, with no steps.
+- **A promise returned by the body is awaited**, and its rejection is the
+  body's failure. The body is told nothing of the search; it must decide
+  the same way given the same answers, and must not decide after it has
+  returned or settled.
+- **A run cut off past `maxDecisions` (10,000 by default, `Infinity` for
+  none) is a violation** on the state the run was for, with the cut-off as
+  its error and no state harvested: the body does not end under that
+  schedule. That is what keeps a run that keeps deciding from hanging the
+  search, since no limit of the search can interrupt a run; a run that
+  loops or waits without deciding is beyond any limit. The throw is kept
+  by the run's `Decisions` and thrown by every later decision, so the
+  body cannot go on past it, and the run's failure is the cut-off whatever
+  the body threw or caught.
+- **A `DecisionsError` is the test's error, never the body's failure**: a
+  wrong use of `Decisions` (a range below 1, no alternatives, a replayed
+  pick the body does not offer), a body whose decisions have changed (a
+  replayed decision has other alternatives than it had, or a run makes
+  fewer decisions than it replays), or a decision made once the run is
+  over. It says which run's decisions it happened at. The first such error
+  is kept by the run's `Decisions`, thrown by every later decision, and
+  recorded on the state once the body is done, whatever the body did with
+  it. `invariant` reports nothing for such a state, and `getEvents`, which
+  the search calls right after, throws it: the one callback whose throw
+  the search does not take for an error of the model (§5), so `check`
+  rejects with it, at once, and the next search meets it again.
+- **A run is over once the body has returned or its promise has settled**,
+  and the body is called through an async function so that a throw takes
+  the same tick as a return. A decision after that, from work the body
+  left running, is thrown to that work, and remembered by the model, which
+  throws it at the next state any search asks the model about: the search
+  cannot be told at the moment, but is told at its next step, or at the
+  first step of the next search that asks anything (a kept cache that
+  already holds everything asks nothing, and is not told). Work the body
+  does not await must therefore not decide. That a microtask the body
+  queues still runs before the run is over, and counts as a decision of
+  the run, is an accident of where the `await` falls, not a promise.
+- **Labels** are how a pick reads: an alternative's own, or `maybe`'s and
+  `integer`'s label for a pick that is not 0 (a function is given the
+  pick; words get the pick added above two alternatives), and the pick
+  itself otherwise.
+- **The model's `report`** asks for the charged steps alone (§9.2).
+
+`runOnce(body, decisions)` runs the body once with those decisions
+replayed, or with a violation's, for seeing a reported failure again; a
+decision the body does not offer, or more decisions than it makes, is a
+`DecisionsError`. Why: D36, D37.
+
 ---
 
 ## 10. Verification
@@ -443,8 +530,9 @@ types.
 | `src/search.ts` | the model, cost helpers, `StateSpaceCache`, `explore`, `analyzeCache`, `exploreIteratively`, `exploreOnce`, `shortestViolation` |
 | `src/report.ts` | `formatViolation`, `ViolationError`, `IncompleteError` |
 | `src/check.ts` | `check` |
+| `src/decisions.ts` | `Decisions`, `decisionModel`, `decisionsOf`, `runOnce`, `DecisionsError` |
 | `src/index.test.ts` | behaviour and regressions of the search |
-| `src/report.test.ts`, `src/check.test.ts` | the report, and the verdict |
+| `src/report.test.ts`, `src/check.test.ts`, `src/decisions.test.ts` | the report, the verdict, and code that decides |
 | `src/oracle.test.ts` | the brute-force oracle (§10) |
 | `examples/` | runnable models, imported as `stifinder`, which the test config maps to `src/` |
 | `scripts/check-commit-message.mjs` | the release-notes check CONTRIBUTING describes |

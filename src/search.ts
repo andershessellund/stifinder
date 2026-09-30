@@ -86,6 +86,17 @@ export type EdgeResult<State> = { to: State } | { error: unknown; badState?: Sta
 /** What `invariant` returns: nothing for a state that is fine, `{ error }` for one that is not. */
 export type InvariantResult = { error: unknown } | undefined | void;
 
+/** How a violation is rendered, by `formatViolation` and in a `ViolationError`. */
+export interface FormatOptions {
+  /**
+   * Which steps to list: every one (`'all'`, the default), or only those
+   * charged something besides the step itself, a deviation or a cost key
+   * (`'charged'`). The steps keep their numbers, so a listed step still
+   * says where in the run it was.
+   */
+  steps?: 'all' | 'charged';
+}
+
 /** One event the caller wants the explorer to consider from a state. */
 export interface EventDescriptor<Event> {
   event: Event;
@@ -110,6 +121,11 @@ export interface Model<State, Event> {
    * (most-preferred first). The event at index 0 is always the
    * deviation-zero baseline; every other event charges one unit of the
    * implicit `__deviations__` key. Every event charges one `__steps__`.
+   *
+   * Unlike the other callbacks, a throw here is not taken for an error of
+   * the model: it is the search that fails. The call rejects with it, the
+   * cache stays consistent, and the next call meets the same throw. That is
+   * the way for a model to say that the test itself is wrong.
    *
    * Must be a pure function of `state`: results are memoized for the
    * lifetime of the cache.
@@ -166,6 +182,12 @@ export interface Model<State, Event> {
    * only when a violation is rendered, for the state that failed a check.
    */
   describeState?(state: State): string;
+  /**
+   * Optional: how a violation of this model is rendered, unless the caller
+   * says otherwise. A model whose expected steps have no words of their own
+   * lists the charged steps alone.
+   */
+  report?: FormatOptions;
 }
 
 /** @deprecated The old name of {@link Model}. */
