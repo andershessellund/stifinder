@@ -685,11 +685,11 @@ limit. **Rejected:** the cut-off as a `DecisionsError`, the first form. A
 run that does not end under its schedule is a fact about the body: after a
 deviation it is a livelock the search has found, and reported as "the test
 is wrong" it came with no path to it (an independent review, the same
-day). It is a violation on the state the run was for, so the path is the prefix and
-not ten thousand zeros, and `runOnce` replays it. A state is a value the
-caller cannot look into
-(`DecisionState`), which leaves its form free: merging states by a
-fingerprint of the world at a decision, if a body can give one, is under
+day). It is a violation on the state the run was for, so the path is the
+prefix and not ten thousand zeros, and `runOnce` replays it. A state is a
+value the caller cannot look into (`DecisionState`), which leaves its form
+free: merging states by a fingerprint of the world at a decision, if a body
+can give one, is under
 Open; `decisionsOf` gives the decisions of a violation from its steps'
 events, which stay the picks whatever a state becomes. DESIGN.md §9.3.
 
