@@ -1,49 +1,16 @@
 // ---------------------------------------------------------------------------
 // stifinder — generic state-space exploration
 //
-// Two-layer API:
+// A `StateSpaceCache` owns a `Model` and keeps everything computed from it:
+// the events of each state, the result of each edge, every (state, cost)
+// pair reached with its predecessor, and the edges not yet traversed.
+// `explore(cache, budget)` runs one budget-bounded breadth-first search and
+// fills the cache; `analyzeCache(cache, budget)` projects it onto a budget.
+// `exploreIteratively` deepens the deviation budget from 0 until a violation
+// appears, and `exploreOnce` is one search on a cache it discards.
 //
-//   1. `StateSpaceCache<State, Event>` — a mutable, budget-independent cache
-//      of (state -> events), (state, event -> result), every (state, cost)
-//      pair reached so far with its predecessor, and the pending edges not
-//      yet traversed. Owns the `Model` so a cache can never be mixed
-//      with another model. Reusable across many `explore()` calls;
-//      the expensive work is `applyEvent` invocations and they are never
-//      repeated.
-//
-//   2. `explore(cache, budget, options?)` — runs one budget-bounded BFS.
-//      Populates the cache as a side effect and returns an `ExploreResult`
-//      (statistics only). `analyzeCache(cache, budget)` projects the cache
-//      onto a budget: reachable states with their Pareto-minimum costs, the
-//      transitions between them, and the shortest violation path.
-//
-// `exploreIteratively(cacheOrModel, options?)` calls `explore` with
-// deviation budgets 0, 1, 2, … up to a cap, stopping at the first budget
-// that exhibits a violation. This produces the minimum-deviation violation
-// trace.
-//
-// `exploreOnce(model, budget, options?)` constructs a fresh cache,
-// explores, analyzes, and discards it.
-//
-// Deviation semantics
-// -------------------
-// `getEvents(state)` returns events in *preference order*. The event at
-// index 0 is the deviation-zero baseline; every other event charges one
-// unit of the implicit `__deviations__` budget — regardless of whether
-// the index-0 event is affordable under the current budget. This follows
-// delay-bounded scheduling (Emmi, Qadeer & Rakamarić, POPL 2011), except
-// that a departure costs one deviation whichever index it takes (a delay
-// skips one task, so the k-th alternative costs k delays there), and that
-// the budget is generalized to a vector of user-defined cost dimensions.
-//
-// Ordering of violations
-// ----------------------
-// "Shortest" is lexicographic: fewest deviations, then smallest total
-// non-deviation cost, then fewest steps. Exploration processes deviation
-// levels in ascending order and, within a level, pending edges in
-// ascending depth. Lower levels are never repopulated by higher ones, so
-// the first arrival at a (state, cost) pair is at minimum depth for that
-// cost, and the stored predecessors reconstruct minimum-step paths.
+// How the search works and what its order guarantees is in DESIGN.md, and
+// why it is built this way in DECISIONS.md, both at the repository root.
 // ---------------------------------------------------------------------------
 
 import { HashMap, ValueMap, intern } from 'valsem';

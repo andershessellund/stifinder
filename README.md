@@ -81,6 +81,12 @@ all unaffordable is not terminal, and is not shown to `terminalInvariant`. A
 model that bounds its runs by returning `[]` after so many steps does make
 those states terminal, and its `terminalInvariant` has to expect them.
 
+For the same reason, offer a fault beside a free event, never as a state's
+only event. A fault never has to happen, so a run can end where only faults
+remain, and a state that has an event is not checked as an end. With
+`[stay, crash]` in place of `[crash]`, not crashing is a step, and where it
+leads is an end.
+
 Each event may also list explicit **cost keys**
 (`{ event, cost: ['crash', 'retry'] }`); leaving `cost` out means none. A key
 listed twice costs two units. A budget is a vector of per-key
@@ -278,6 +284,11 @@ be whole. Anything else, `NaN` included, is a `RangeError`.
 ## Requirements
 
 Node 22 or newer, ES modules, TypeScript types included.
+
+## Working on stifinder
+
+[DESIGN.md](DESIGN.md) describes how it is built, [DECISIONS.md](DECISIONS.md)
+why, and [CONTRIBUTING.md](CONTRIBUTING.md) how to change it.
 
 ## License
 

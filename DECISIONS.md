@@ -1,0 +1,516 @@
+# Decisions
+
+Why stifinder is built the way it is, and not some other way. One entry per
+decision, in its final form: what was chosen, the alternatives that were
+rejected and the evidence that rejected them, and the cost accepted. When a
+decision changes, its entry is rewritten and the old choice becomes a
+rejected alternative; git history keeps the sequence. Entries are grouped by
+topic, and the `D` numbers are stable identifiers, not an order.
+
+How the mechanisms work is [DESIGN.md](DESIGN.md)'s job; an entry here
+states the decision and points there. Numbers quoted are the measurements
+at the time of the decision. Where the evidence is a counterexample, it is
+kept as a test, and the entry names it. `(#n)` is the pull request in which
+the decision was made; its description has the detail. An entry whose reason
+was not written down at the time says so, and does not supply one afterwards.
+
+## The model
+
+### D1. A model is an initial state and pure callbacks, and every result is kept
+
+`getEvents`, `applyEvent`, `invariant` and `terminalInvariant` must be
+functions of their arguments alone. The cache keeps each result for as long
+as it lives.
+
+**Why.** The expensive work is `applyEvent`: for a simulator, running the
+system under test one step. Iterative deepening visits the same states at
+every budget, so with kept results each deeper budget pays only for what is
+new, and a cache can be resumed after a limit or asked about other budgets
+at no cost. **Cost.** Purity is required and is not checked: a callback
+that reads a clock, a random source or state outside the model produces a
+wrong state space, silently. The cache holds every state it has seen.
+DESIGN.md §2.2, §4.
+
+### D2. States and events are valsem values, interned where the cache first sees them (#17)
+
+The initial state, every successor and every event are interned once, on
+first sight. Callbacks receive, and results hold, canonical frozen values.
+
+**Why.** Structural equality is what makes a state reached a second way the
+same state. Interned once, every later lookup is a probe instead of a walk,
+results share one copy, and a model that mutates a state it was given fails
+at that step. **Rejected:** interning only the initial state and
+`badState`, the earlier form. Successors were hashed by walking them at
+each lookup: exploring a model with 400-number states and a cost key took
+797 ms and takes 131 ms, and the dining philosophers take half as long. And
+a model that mutated a state silently changed the cache's copy; a test
+shows the trace it used to corrupt. **Cost.** States and events must be
+values valsem can intern: a `Date`, a native `Map` or an unregistered class
+instance is rejected. A mutating model now throws a `TypeError`, reported
+as the violation. DESIGN.md §2.3.
+
+### D3. Events come in preference order, and any departure from index 0 costs one deviation
+
+`getEvents` returns events most-preferred first. Index 0 is the baseline;
+taking any other index charges one unit of `__deviations__`, whichever
+index it is, and whether or not the index-0 event is affordable.
+
+**Why.** The baseline is the schedule the model's author expects, and a
+failure is measured by how far it strays from it. This follows delay
+bounding (Emmi, Qadeer & Rakamarić, "Delay-bounded scheduling", POPL 2011):
+a deterministic scheduler with a bounded number of departures from its
+default choice. **Not
+recorded:** why a departure costs one whichever alternative it takes, where
+delay bounding charges *k* for the *k*-th alternative, and why the charge
+ignores whether index 0 is affordable. The difference from the paper was
+noticed in review and documented (#17), not decided then. **Cost.** How a
+deviation is charged is API: changing it is a major version (D23).
+DESIGN.md §3.1.
+
+### D4. Cost is a vector of named keys, and a budget a vector of allowances
+
+An event lists the keys it consumes, one unit per occurrence. A path's cost
+is the sum; a budget allows so much of each key. `__deviations__` is one
+key of the same vector, reserved: it is counted by the search, and an event
+that lists it is rejected.
+
+**Why.** A system's faults are of different kinds, and a test bounds them
+separately: one lost message, no crash, any number of reorderings. The
+Durable Object simulator stifinder was extracted from does exactly that,
+with `rpcFail`, `d1Fail`, `crash` and `skipEviction`. **Cost.** Costs are
+partially ordered, so a state has no single best cost. What is kept per
+state is a Pareto frontier of arrivals (D13), and every comparison of costs
+walks their keys. DESIGN.md §3.
+
+### D5. A model says what is wrong in three places (#12, #13)
+
+`applyEvent` returns `{ error }` for a failure while doing something.
+`invariant` rejects a state that is wrong in itself. `terminalInvariant`
+rejects a state that is wrong to end in. A failed check is recorded as an
+error on the edge into the state, carrying the state as `badState`.
+
+**Why.** Before `invariant`, a wrong state had to be smuggled into
+`applyEvent` by computing the successor and then rejecting it. Then the
+initial state was never checked, the check ran once per edge into a state
+instead of once per state, and the violation could not show the state,
+since an error had been returned in place of it. Before
+`terminalInvariant`, a model could only tell an end by working out for
+itself whether anything could still happen, which is `getEvents` over
+again. Recording a failed check as an error edge meant ordering, budgets,
+`analyzeCache` and `shortestViolation` needed no new cases: the shortest
+violation is reported whichever kind it is. **Rejected:** built-in deadlock
+detection. "No events and not finished" needs the model to say what
+finished means, and `terminalInvariant` lets it. DESIGN.md §2.4.
+
+### D6. Two checks, not a `terminal` flag on one (#13)
+
+**Why.** Whether a state is terminal is known only once `getEvents` has run
+on it, so a flag would put `getEvents` before `invariant` for every state,
+including those the invariant rejects. The invariant guards `getEvents`:
+asking a broken state for its events may be meaningless. The order is
+`invariant`, then `getEvents`, then, if that was empty,
+`terminalInvariant`; a test pins the call sequence. **Cost.** None when
+`terminalInvariant` is absent. When it is present, `getEvents` for a
+successor moves forward to the moment the edge into it is applied. It is
+the same kept call the search would make anyway, so each state is still
+asked once. DESIGN.md §2.4.
+
+### D7. Terminal is a property of the model, not of a budget (#13)
+
+A state is terminal when `getEvents` returns `[]`. A state whose events are
+all beyond the budget is not, and is not shown to `terminalInvariant`. A
+model that bounds its runs by returning `[]` after so many steps makes
+those cut-offs ends, and its `terminalInvariant` has to expect them.
+
+**Why.** The check's result is kept per state (D1), and an end that
+depended on the budget could not be. **Rejected:** checking the states a
+run is stuck in under its budget, those with no affordable event. The
+simulator's tests did this by hand, for "with at most one crash, no run
+ends unresolved". It is the wrong test, because
+being out of budget is a property of a run, not of a state: a state reached
+cheaply by one path and dearly by another has an affordable event, so it is
+passed over, though the dear run is stranded there. With more budget, fewer
+such states are caught. What the property needs is that a fault is
+optional, so a state where only faults remain is a place a run can end at
+any budget, and that is a fact about the model. Hence the rule: **a fault
+is offered beside a free event, never as a state's only event.** Then
+declining the fault is a step, and where it leads is terminal. Test:
+`terminalInvariant` › "nor is a state whose only event is a fault, at any
+budget: a fault goes beside a free event". **Cost.** A model that offers a
+fault alone gets no check there and no warning. A flag for it is under
+Open. DESIGN.md §2.5.
+
+### D8. `badState` is the cache's to add (#16)
+
+`ApplyResult` is `{ to } | { error }`. The cache adds `badState` when a
+state fails a check, and drops one that `applyEvent` returns.
+
+**Why.** `badState` reports a state that failed `invariant` or
+`terminalInvariant`; an error from `applyEvent` has no state. The type
+alone cannot keep one out, because TypeScript does not check an arrow
+function's returned literal for extra properties, so the cache drops it at
+run time. DESIGN.md §2.4.
+
+### D9. A model is light to write (#11)
+
+`cost` may be omitted. A callback may return its result or a promise of it.
+`exploreIteratively` takes a model directly, or a cache to keep. The type
+is `Model`.
+
+**Why.** Writing the dining philosophers example showed where the API made
+a caller work: the README's opening example lost its cache, its two
+`async`s and four `cost: []`s. Callbacks were already awaited, so accepting
+synchronous ones changed only types. **Cost.** Every callback result is
+awaited, synchronous or not. kilde's experiment of 2026-09-13, against
+0.0.1, measured about 5 µs of fixed cost per edge (interning, the cache
+lookup, the frontier update and two promise hops) against 1 µs per run for
+a depth-first loop: twice the time on its real suite, where a test body
+costs 30 µs.
+
+## The search
+
+### D10. "Shortest" is lexicographic: deviations, then other cost, then steps
+
+The violation reported is the one with the fewest deviations; among those,
+the smallest sum of the other cost keys; among those, the fewest steps.
+
+**Why.** Fewest deviations first is the point of the library: the failure
+that strays least from the expected schedule is the least surprising one,
+and the counterexample a reader wants. **Not recorded:** why the other keys
+are compared by their sum, and not key by key, and why steps come last.
+**Cost.** The promise holds for a run that completed. A run cut short
+guarantees only the fewest deviations, since a violation with less other
+cost may lie where it did not reach; the README's result table says so
+(#17). Which violation is reported is API (D23). DESIGN.md §6.2.
+
+### D11. Which of several tied violations is reported is unspecified (#17)
+
+Of violations equal in deviations, other cost and steps, the one reported
+follows the order of exploration. `analysis.violation` and
+`shortestViolation(analysis)` agree on rank, and may pick different ones.
+
+**Why.** The order of exploration is free to change (D23), and promising a
+particular violation among equals would make it API. **Rejected:** the
+earlier documentation, which said the two searches agree. They did not on
+ties, and CONTRIBUTING's rule that the reported violation is API conflicted
+with the order of exploration being free. Test: `regressions` › "of
+violations that tie, either may be reported, and the two searches may
+differ". DESIGN.md §6.2.
+
+### D12. Deviation levels in ascending order, and each level's depths in turn (#17)
+
+Pending edges are kept by the successor's deviation count, then by its
+depth. A call drains the levels from the lowest, and each level from the
+shallowest depth, stepping a cursor.
+
+**Why.** Traversing an edge at level *d* queues edges at level *d* or
+higher, one step deeper, so lower levels are never refilled and the first
+arrival at a (state, cost) pair is the shallowest for that cost. Stored
+predecessors then rebuild a path with the fewest steps, with no priority
+queue. **Rejected:** searching a level for its lowest depth each time, the
+earlier form. It is quadratic in the depth of a level, and a long run with
+an alternative at every step, the usual shape of a simulation, fills one
+level with a depth per step: a 50,000-step run took 2.6 s and takes 185 ms.
+The cursor relies on a level only growing deeper within a call; if that
+were ever broken, the loop throws an internal error instead of spinning.
+DESIGN.md §5.
+
+### D13. Arrivals are kept per (state, cost); a dominated one is not recorded, and a recorded one is never removed
+
+A new arrival at a cost that is at least one already recorded for its state
+is skipped. An arrival already recorded stays, even once a cheaper one
+dominates it. Pareto pruning happens when the cache is projected onto a
+budget.
+
+**Why.** A dominated arrival adds nothing: every path on from it exists
+from the cheaper one, at no more cost. Keeping recorded arrivals keeps
+their predecessors stable, and paths are rebuilt from predecessors.
+**Cost.** `reached` can hold arrivals that the projection discards, and the
+projection compares each state's arrivals pairwise. DESIGN.md §3.3, §6.1.
+
+### D14. An unaffordable edge is deferred, not dropped, and an unbounded budget ends where the levels do (#15)
+
+An edge beyond the budget in a key other than deviations moves to
+`deferred`, and every later call re-checks it against its own budget. A
+call visits only the deviation levels that have edges.
+
+**Why.** The cache is independent of budgets (D16), so an edge one call
+cannot afford must still be there for a richer one. Test: `regressions` ›
+"reusing a cache across non-monotone budgets does not lose deferred edges".
+**Rejected:** stepping through the levels one by one up to the budget's.
+With `{ __deviations__: Infinity }` that never ended, and never reached a
+deadline check, so `timeoutMs` did not stop it. DESIGN.md §5.
+
+### D15. `shortestViolation` prunes by dominance (#17)
+
+The search over the transition table skips a (state, cost) pair reached at
+a cost no lower than one already seen for its state.
+
+**Why.** Whatever follows the pair follows the cheaper one too, and ranks
+strictly better there, so the result is the same. And the search ends at
+any budget: with finitely many cost keys, a sequence of costs in which none
+is at least an earlier one is finite (Dickson's lemma). **Rejected:**
+searching without pruning. With an unbounded deviation budget and a cycle
+that costs a deviation it never ended, and since #15 `exploreOnce` hands
+such an analysis back. DESIGN.md §6.3.
+
+## The cache and its results
+
+### D16. One budget-independent cache per model, and one search on it at a time
+
+A `StateSpaceCache` owns its model. `explore` fills it as a side effect and
+returns statistics; `analyzeCache` projects it onto a budget.
+`exploreIteratively` and `exploreOnce` are built from those two.
+
+**Why.** A richer budget can only enable more transitions, never invalidate
+one, so nothing stored needs a budget attached, and one cache serves
+budgets in any order. Owning the model means a cache cannot be mixed with
+another model's results. A second `explore` on a cache while one is in
+flight is rejected: both would drain the same queues. DESIGN.md §4.
+
+### D17. Every result says whether it is exhaustive, for its own budget (#11, #15)
+
+`exhaustive` is true when no edge is left at any budget and everything the
+cache holds is within the budget of the call.
+
+**Why.** `completed: true, violation: null` reads like a proof and is not
+one: a run capped at one deviation reports exactly that about a failure two
+deviations deep. Telling the two apart meant inspecting the cache's queues
+by hand. **Rejected:** the first form, which reported the cache's own
+exhaustiveness. On a cache explored earlier at a larger budget, a second
+`exploreIteratively` stopped at budget 0 with `violation: null, exhaustive:
+true`, although the first run had found a violation. The cache now keeps
+the componentwise maximum of every cost it records, and a result is
+exhaustive only when its budget covers that. `cache.exhaustive` keeps its
+meaning: the cache holds everything, explored at whatever budgets. Tests:
+`exhaustive: what a result without a violation proves`. DESIGN.md §8.
+
+### D18. However a call ends, the cache is consistent (#15)
+
+A call that returns, hits a limit or rejects leaves every untraversed edge
+queued. After a throw, the next call meets the same throw.
+
+**Why.** A cache is kept across calls, so what one call leaves behind is
+the next call's premise. **Rejected:** the earlier order, which recorded an
+arrival before asking for its events and took a bucket of edges out of
+`pending` before traversing it. When `getEvents` threw, or valsem could not
+intern a state, the arrival was recorded but never expanded and the rest of
+the bucket was gone; the next call could complete with `exhaustive: true`
+without exploring what was lost. Now whatever can throw comes before an
+arrival is recorded, and a `finally` puts untraversed edges back. Tests: `a
+callback that throws`. DESIGN.md §5.
+
+### D19. Iterative deepening stops where no larger deviation budget could find more (#15)
+
+`exploreIteratively` stops short of `maxDeviations` at a violation, or once
+nothing is pending, nothing in the cache took more deviations than the
+current budget, and every deferred edge needs more than `baseBudget`.
+
+**Why.** Further iterations would find nothing, and with `maxDeviations:
+Infinity` there would be no end to them. **Rejected:** stopping as soon as
+the cache was exhausted, which gave the false proof of D17 on a kept cache;
+and running on to `maxDeviations`, which hung at `Infinity` once the only
+edges left needed more of the base budget. **Cost.** For a run that only a
+larger `baseBudget` could take further, `maxDeviationsReached` is where it
+stopped, not `maxDeviations`. DESIGN.md §7.
+
+### D20. A violation carries its whole cost, and each step its index (#9)
+
+`ViolationPath.cost` is the cost of the whole path, the failing event
+included. `ViolationStep.index` is the event's position in `getEvents`.
+
+**Why.** A step's `cost` is the cost before it, so the charge for the
+failing event, often the deviation that matters, appeared nowhere, and a
+step did not say whether it was the baseline or a deviation. A caller
+printing a trace had to read the deviation count off the budget that
+happened to fail and recover the deviating steps by differencing
+neighbouring costs. The index is recorded when the edge is queued:
+**rejected** was looking the event up in `getEvents(state)` afterwards,
+which is ambiguous for an event listed twice. Test: `regressions` › "an
+event listed twice is reported at the index it was taken at". DESIGN.md
+§6.2.
+
+### D21. Budgets and limits are checked (#17)
+
+An allowance, `maxEdges` and `timeoutMs` must be a number, zero or more;
+`maxDeviations` must also be whole. Anything else is a `RangeError`.
+`Infinity` is the way to say no limit.
+
+**Why.** `maxEdges: NaN` was no cap at all, and `NaN` is what
+`Number(process.env.X)` gives with X unset. `NaN` for a cost key was an
+unlimited allowance, but for `__deviations__` it was zero, and
+`maxDeviations: -1` still explored budget 0. A limit that cannot be read is
+an error, not a limit read some other way. DESIGN.md §3.2.
+
+## API surface and verification
+
+### D22. A cache's working state is internal (#16)
+
+A cache's API is its `model`, the canonical `initialState`, `exhaustive`,
+`statesExplored` and the read-only counters. What it stores, the methods
+behind it and the types of its entries are `@internal`, and `stripInternal`
+leaves them out of the published declarations.
+
+**Why.** Everything exported is API, so while the working state was
+exported, any change to how the search stores things was a breaking change.
+**Evidence.** The suite compiles against `src/`, where the internals exist,
+so it cannot see the published types. A scratch consumer compiled against
+`dist/index.d.ts` used the whole public surface and put `@ts-expect-error`
+on each internal member, on an assignment to a counter, and on a `badState`
+in an `ApplyResult`; against the declarations before the change every one
+of those lines failed. DESIGN.md §1.2, §4.
+
+### D23. Which violation is reported, and how cost is counted, are API; the order of exploration is not
+
+Breaking: changing which violation is reported for a model and budget, up
+to ties (D11), or what charges a deviation and how cost keys add up. Free
+to change: the order in which states are explored beyond what the reported
+violation depends on, and so the number of edges a search computes; the
+text of error messages; performance. CONTRIBUTING.md has the full list.
+
+**Why.** A user's test asserts the violation and its cost, so those must
+hold across releases. The search has to stay free to store and order things
+differently, which is also why its working state is internal (D22).
+
+### D24. Before 1.0, a rename keeps the old name, and a breaking release is forced to a minor (#11, #16)
+
+`ExplorerConfig` and `cache.config` remain as deprecated aliases of `Model`
+and `cache.model`. The one breaking change so far (D22, D8) was released as
+0.1.0 with `Release-As` in the pull request's override block.
+
+**Why.** release-please is configured without `bump-minor-pre-major`, so a
+`feat!` would release 1.0.0. Additive changes avoid that; where a break is
+wanted, the version is forced.
+
+### D25. The search is checked against a brute-force oracle on random models (#15, #17)
+
+`src/oracle.test.ts` compares every search against a breadth-first search
+over (state, cost) pairs with no cache, levels, deferral or dominance, on
+seeded random models, after random histories of calls on one cache.
+
+**Why.** The search's mechanisms interact, and its bugs are silent: a false
+proof, or a violation that is not the shortest. The review that found such
+bugs found them with one-off scripts; the oracle keeps them found.
+**Evidence.** On the code before #15 it hangs at its first unbounded
+budget, and with those taken out it fails three of its four properties.
+Given eight deliberate one-line bugs in the search, from taking depths
+deepest-first to not putting interrupted edges back, it fails on every one.
+400,000 models passed at #15, and 160,000 at #17 on the strengthened test,
+which also checks `shortestViolation`. **Cost.** About 100 ms for 300
+models per property; more on request (`FUZZ_RUNS`). DESIGN.md §9.
+
+### D26. valsem is a peer dependency, and CI tests its floor (#18)
+
+The peer range is `>=0.0.3 <1`. A CI job installs the lowest version the
+range admits, read from `package.json`, and runs the typecheck and the
+tests against it.
+
+**Why.** The cache keys by structural equality, so it must share one valsem
+instance with the model's state and event types. A floor that is declared
+and not tested is a guess. Whether to narrow the range, and whether the job
+is a required check, are under Open.
+
+## Testing real code
+
+Settled in the design discussion of 2026-09-30, from two users of
+stifinder: kilde's `kilde/testing`, and the Durable Object simulator
+stifinder was extracted from. None of this is built; see Open.
+
+### D27. stifinder owns the test-facing layer; simulators stay with their systems
+
+Running a search as a test, rendering a violation, re-running the failing
+path, asking questions of the explored space, and exploring a body of code
+that asks for its decisions belong in stifinder. A simulator of a
+particular system does not.
+
+**Why.** Both users wrote that layer for themselves. kilde's adapter is 232
+lines that import nothing from kilde but the type of its decision oracle.
+The simulator's harness has its own `exploreTest`, event and state
+formatters, a traced re-run of the failing path, and an assertion over
+reachable states with the path to a witness. **Rejected:** a simulator, or
+a snapshot-and-restore framework for one, in stifinder. The Durable Object
+simulator is about 2,000 lines of Cloudflare semantics (sessions, replay of
+per-object event logs to re-park handlers, database ops, message fates),
+and to stifinder it is a `Model`. **Left out until something uses it:** a
+task scheduler over the decision oracle; the two that exist have no user
+but a self-test.
+
+### D28. Names are asked of the model when a report is rendered
+
+A model may say how an event reads at a state, and how a state reads.
+Neither is called during a search.
+
+**Why.** In the simulator an event is named from the state it is taken at:
+its indices are resolved against the pre-state's in-flight requests. A
+state summary parses database snapshots. Both make sense only for the few
+states of a reported path. **Rejected:** a `label` on `EventDescriptor`,
+stored with the event list, the first recommendation in the discussion. It
+builds a string for every event offered on every edge of a search that
+reports at most one path, and state summaries would need a lazy form
+anyway. The decision harness keeps its labels in a table of its own and
+answers from that.
+
+### D29. Notes reach the recorder through an argument
+
+`applyEvent` receives a third argument through which a model records what
+happened inside a step. It records on a traced re-run of a reported path,
+and is a no-op during a search.
+
+**Why.** The maintainer's choice, over the alternative below: nothing
+global, and a callback that ignores the argument still type-checks.
+**Rejected:** a module-level `note()` that does nothing unless a recording
+is active, as the simulator's `trace()` is. It is reachable from any depth
+without plumbing, but it is global state: two copies of the package, or
+two searches in one process, would cross. **Cost.** A simulator threads the
+argument to where its notes are made.
+
+### D30. One entry point
+
+Everything is exported from `stifinder`.
+
+**Why.** stifinder is a testing tool throughout, and the harness adds no
+dependency. The test entry takes a model, a cache or a body, so the root
+would import the harness anyway. **Rejected:** a `stifinder/testing`
+subpath, by analogy with `kilde/testing`. kilde's root is a production
+library and its testing helpers need an optional peer, which the subpath
+keeps out of production imports. Neither holds here.
+
+## Non-goals
+
+A simulator of any particular system, or a framework for writing one
+(D27). Built-in deadlock detection (D5). A promise about which of several
+tied violations is reported (D11).
+
+## Open
+
+**Decided, not built.** The model's describers (D28) and the recorder
+argument (D29).
+
+**Proposed, not decided.** The surface sketched in the discussion of D27;
+every name is provisional.
+
+- `check(model | cache | body, options)`: a search as a test. It rejects
+  with the rendered violation, and by default also when `maxEdges` or
+  `timeoutMs` cut the search short. The simulator's harness only logs a
+  timeout, and none of its tests asserts `completed`, so a search stopped
+  by a limit passes there.
+- `formatViolation`, and `explain`, which re-applies each step of a path
+  with the recorder on and says whether the path reproduced.
+- `findPath(space, where)`: the shortest path to a state that satisfies a
+  predicate, for "no state where" and for "some state where".
+- The decision harness moved from kilde: an oracle with `integer`, a
+  `choose` whose alternatives carry cost keys, and `note`; a model built
+  from a body; a single run of a given decision sequence. Two defects in
+  kilde's version must not come along: a body that throws before its first
+  decision passes as exhaustive, and an async body is not awaited.
+- `settle()`: resolves once the microtask queue has drained.
+- An `optional` mark on an event, so that `terminalInvariant` also runs
+  where every event is optional, if a fault offered alone should be
+  supported (D7).
+
+**Undecided, the maintainer's call.** Whether to narrow the valsem peer
+range to `<0.1`, and whether `test (valsem floor)` becomes a required check
+(D26).
+
+**Reasons to record.** Why any departure costs one deviation (D3); why the
+other cost keys are compared by their sum, and steps last (D10).
