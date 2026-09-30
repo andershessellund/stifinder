@@ -27,6 +27,8 @@
 //
 // Reads PR_TITLE, PR_BODY and PR_NUMBER from the environment.
 // ---------------------------------------------------------------------------
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { parser } from '@conventional-commits/parser';
 
 const TYPES = 'feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert';
@@ -104,7 +106,20 @@ export function check(title, body, number) {
   return { problems, overridden: override !== undefined };
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+/** Whether this file is the script node was asked to run, and not a module
+ *  imported by the tests. Compared as real paths: the module's URL is
+ *  percent-encoded and its symlinks resolved, and argv[1] is neither, so a
+ *  plain comparison fails, and the check passes without running, from a path
+ *  with a space in it or one through a symlink. */
+function runAsScript() {
+  try {
+    return realpathSync(process.argv[1] ?? '') === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+if (runAsScript()) {
   const { PR_TITLE: title = '', PR_BODY: body = '', PR_NUMBER: number = '0' } = process.env;
   const { problems, overridden } = check(title, body, number);
   if (problems.length === 0) {
