@@ -199,15 +199,17 @@ have no words of their own. The decisions that led there are
 **`decisionsOf(error)`**, and **`runOnce(body, error)`** runs the body once
 more with exactly those, under a debugger if you like.
 
-Two requirements. The body must make the same decisions given the same
+Three requirements. The body must make the same decisions given the same
 answers, since it is run again for every prefix; one whose decisions change
-between runs is rejected. And one run of it must end: past `maxDecisions`
+between runs is rejected. One run of it must end: past `maxDecisions`
 (10,000 unless `decisionModel` is told otherwise) it is cut off, since no
-limit of the search can interrupt a run. Either, or a wrong use of
-`Decisions`, is a **`DecisionsError`**, never a violation: the search rejects
-with it, whatever the body does with it. A body that throws before its first
-decision, or on the expected run, fails like any other, and a rejected
-promise is the body's failure.
+limit of the search can interrupt a run. And it must not decide once it is
+done, from work it left running: no run could replay that. Any of these, or
+a wrong use of `Decisions`, is a **`DecisionsError`**, never a violation:
+the search rejects with it, whatever the body does with it, and a decision
+made late is thrown to the work that made it and to the next search of the
+model. A body that throws before its first decision, or on the expected
+run, fails like any other, and a rejected promise is the body's failure.
 
 ## Reading a result
 
@@ -411,9 +413,13 @@ whichever it is.
 | `report` | `check` | the model's own | how a `ViolationError` renders the violation: `{ steps: 'all' }` or `{ steps: 'charged' }`, the latter what `decisionModel` asks for |
 
 A run that hits a limit reports `completed: false` and leaves the cache
-consistent; the next `explore` on it picks up where it stopped. A callback
-that throws leaves it just as consistent: the call rejects, and the next one
-meets the same throw.
+consistent; the next `explore` on it picks up where it stopped. A throw
+from `applyEvent`, `invariant` or `terminalInvariant` is an error of the
+model, and a violation like any other. A throw from `getEvents` is not: it
+is the search that fails. The call rejects with it, the cache is left just
+as consistent, and the next call meets the same throw. That is how a model
+says the test itself is wrong, as `decisionModel` does with a
+`DecisionsError`.
 
 Budgets are accepted as plain objects or as canonical `ValueMap<string,
 number>` values (`BudgetVector`); `toBudget` normalizes either form.

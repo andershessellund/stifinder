@@ -338,6 +338,36 @@ describe('a DecisionsError is the test being wrong, and never a violation', () =
     expect(() => decisionModel(endless, { maxDecisions: 0 })).toThrow(RangeError);
   });
 
+  it('a decision made once the body is done is thrown to the work that made it, and to the next search of the model', async () => {
+    // The body leaves a timer running that decides after the run is over.
+    const lateErrors: unknown[] = [];
+    const model = decisionModel((decide) => {
+      decide.integer(2);
+      setTimeout(() => {
+        try {
+          decide.integer(2);
+        } catch (error) {
+          lateErrors.push(error);
+        }
+      }, 0);
+    });
+    // The search is over before any timer fires, so this one resolves.
+    await check(model, { maxDeviations: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(lateErrors).toHaveLength(1);
+    expect(lateErrors[0]).toBeInstanceOf(DecisionsError);
+    expect((lateErrors[0] as Error).message).toMatch(/decided after it was done/);
+    // The model remembers, and the next search of it rejects at its first step.
+    await expect(check(model)).rejects.toBe(lateErrors[0]);
+    // A microtask the body queues runs before its run is over, and is a decision of the run.
+    const queued = decisionModel((decide) => {
+      decide.integer(2);
+      queueMicrotask(() => decide.integer(2));
+    });
+    await check(queued);
+    expect(queued.runs).toBe(4);
+  });
+
   it('is met again by the next search of the model, like any callback that throws', async () => {
     const model = decisionModel((decide) => decide.integer(0));
     await expect(check(model)).rejects.toBeInstanceOf(DecisionsError);
@@ -380,6 +410,15 @@ describe('runOnce and decisionsOf', () => {
   it('rejects a decision the body does not offer, or more decisions than it makes', async () => {
     await expect(runOnce(body, [1, 3])).rejects.toThrow(/decision 1 has 3 alternatives, and pick 3 is not one of them/);
     await expect(runOnce(body, [0, 0, 0])).rejects.toThrow(/made 2 decisions of the 3 given/);
+  });
+
+  it('cuts a run off past maxDecisions, as a search would, instead of hanging', async () => {
+    const endless: DecisionBody = (decide) => {
+      for (;;) decide.integer(2);
+    };
+    await expect(runOnce(endless, [])).rejects.toThrow(/more than 10000 decisions/);
+    await expect(runOnce(endless, [], { maxDecisions: 3 })).rejects.toThrow(/more than 3 decisions/);
+    await expect(runOnce(endless, [], { maxDecisions: 0 })).rejects.toThrow(RangeError);
   });
 });
 

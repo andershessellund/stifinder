@@ -122,6 +122,11 @@ export interface Model<State, Event> {
    * deviation-zero baseline; every other event charges one unit of the
    * implicit `__deviations__` key. Every event charges one `__steps__`.
    *
+   * Unlike the other callbacks, a throw here is not taken for an error of
+   * the model: it is the search that fails. The call rejects with it, the
+   * cache stays consistent, and the next call meets the same throw. That is
+   * the way for a model to say that the test itself is wrong.
+   *
    * Must be a pure function of `state`: results are memoized for the
    * lifetime of the cache.
    */

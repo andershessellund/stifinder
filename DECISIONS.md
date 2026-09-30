@@ -710,10 +710,19 @@ offered no way to replay.
 A `DecisionsError` is the test being wrong, not the code under it, and a
 violation would say the opposite. It escapes the search by way of
 `getEvents`, the one callback whose throw the search does not take for an
-error of the model (D18): the run keeps the first such error, throws it
-again at every later decision, and records it on the state once the body
-is done, whatever the body did with it; `invariant` reports nothing for
-that state, and `getEvents`, called on it right after, throws.
+error of the model: the run keeps the first such error, throws it again at
+every later decision, and records it on the state once the body is done,
+whatever the body did with it; `invariant` reports nothing for that state,
+and `getEvents`, called on it right after, throws. That asymmetry between
+`getEvents` and the other callbacks is now load-bearing, so it is stated in
+`getEvents`'s doc and the README, and pinned by a test in the search suite
+("is an error of the model from applyEvent and the checks, and the failure
+of the search from getEvents"). A decision made once the run is over, from
+work the body left running, is thrown to that work and remembered by the
+model, which throws it at the next state a search asks about: the one way
+left to misuse `Decisions` without being told, which the review's second
+round found. `runOnce` has the same cap as a search, since a debugging
+helper that hangs is worse than one that errors.
 
 **Rejected:** `check(body)`, an overload on `typeof subject === 'function'`,
 the first form. A zero-argument function that returns a model type-checks

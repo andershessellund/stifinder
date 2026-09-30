@@ -21,11 +21,12 @@
 // move of (D36).
 //
 // A wrong use of `Decisions`, a body whose decisions change between runs,
-// or a run past the decision cap is a `DecisionsError`: not a failure of
-// the body, but of the test. It is thrown through the body, remembered if
-// the body catches it, and handed to the search from `getEvents`, the one
-// callback whose throw the search does not take for an error of the model.
-// So `check` rejects with it, at the moment it occurs (D37).
+// a run past the decision cap, or a decision made after the run is over is
+// a `DecisionsError`: not a failure of the body, but of the test. It is
+// thrown through the body, remembered if the body catches it, and handed
+// to the search from `getEvents`, the one callback whose throw the search
+// does not take for an error of the model. So `check` rejects with it, at
+// the moment it occurs, or at the next state it asks about (D37).
 // ---------------------------------------------------------------------------
 
 import { HashMap } from 'valsem';
@@ -70,6 +71,11 @@ export interface Decisions {
    * Pick one of `alternatives`, and return its value. The first is the
    * expected pick; any other is a deviation. Each charges the cost keys it
    * lists. One alternative is no decision.
+   *
+   * The value comes back as the union of the alternatives' values, `'ok' |
+   * 'lost'` for two strings. An array or object value is inferred deeply
+   * readonly the same way, `readonly [1, 2]` for `[1, 2]`; give `T`
+   * yourself where that is not wanted: `choose<number[]>([...])`.
    */
   choose<const T>(alternatives: readonly Alternative<T>[]): T;
 }
@@ -112,9 +118,9 @@ export interface DecisionModel extends Model<DecisionState, number> {
 
 /**
  * A wrong use of `Decisions`, a body whose decisions change between runs,
- * or a run of the body past `maxDecisions`. It is the test that is wrong,
- * not the code under it, so this is never reported as a violation: the
- * search rejects with it.
+ * a run of the body past `maxDecisions`, or a decision made once the body
+ * is done. It is the test that is wrong, not the code under it, so this is
+ * never reported as a violation: the search rejects with it.
  */
 export class DecisionsError extends Error {
   constructor(message: string) {
@@ -124,6 +130,15 @@ export class DecisionsError extends Error {
 }
 
 const DEFAULT_MAX_DECISIONS = 10_000;
+
+/** The decision cap an options object gives, checked. */
+function capOf(options: Pick<DecisionModelOptions, 'maxDecisions'> | undefined): number {
+  const cap = options?.maxDecisions ?? DEFAULT_MAX_DECISIONS;
+  if (!Number.isInteger(cap) || cap < 1) {
+    throw new RangeError(`stifinder: maxDecisions must be a whole number of 1 or more, not ${String(cap)}`);
+  }
+  return cap;
+}
 
 type Picks = readonly number[];
 const picksOf = (state: DecisionState): Picks => state as unknown as Picks;
@@ -154,10 +169,13 @@ const describeInteger =
  * `expected`, the range each replayed decision had when it was first met,
  * a body whose decisions have changed is caught. The first
  * `DecisionsError` is kept, and thrown again by every later decision, so
- * a body that catches it cannot go on as if it had not happened.
+ * a body that catches it cannot go on as if it had not happened. Once the
+ * run is over (`close`), a decision is a `DecisionsError` too: it is made
+ * by work the body left running, which no run can replay.
  */
 class Replay implements Decisions {
   #index = 0;
+  #closed = false;
   readonly branches: Branch[] = [];
   /** The first wrong use, if any: `run` throws it once the body is done. */
   error: DecisionsError | null = null;
@@ -166,11 +184,18 @@ class Replay implements Decisions {
     private readonly picks: Picks,
     private readonly expected: readonly (number | undefined)[] | undefined,
     private readonly maxDecisions: number,
+    /** Told of a decision made after `close`, which the run itself can no longer report. */
+    private readonly onLate: (error: DecisionsError) => void,
   ) {}
 
   /** Decision points consulted so far. */
   get consulted(): number {
     return this.#index;
+  }
+
+  /** The run is over: any decision from now on is a wrong use. */
+  close(): void {
+    this.#closed = true;
   }
 
   #fail(message: string): never {
@@ -179,6 +204,13 @@ class Replay implements Decisions {
   }
 
   #decide(branch: Branch): number {
+    if (this.#closed) {
+      const error = new DecisionsError(
+        'the body decided after it was done: work it left running asked for a decision, which no run can replay',
+      );
+      this.onLate(error);
+      throw error;
+    }
     if (this.error !== null) throw this.error;
     const i = this.#index;
     if (i >= this.maxDecisions) {
@@ -231,12 +263,13 @@ class Replay implements Decisions {
  * `check(decisionModel(body))`.
  */
 export function decisionModel(body: DecisionBody, options?: DecisionModelOptions): DecisionModel {
-  const maxDecisions = options?.maxDecisions ?? DEFAULT_MAX_DECISIONS;
-  if (!Number.isInteger(maxDecisions) || maxDecisions < 1) {
-    throw new RangeError(`stifinder: maxDecisions must be a whole number of 1 or more, not ${String(maxDecisions)}`);
-  }
+  const maxDecisions = capOf(options);
   const table = new HashMap<Picks, Entry>();
   let runs = 0;
+  // A decision made after a run was over. It is thrown where it is made,
+  // to whatever the body left running, and from here at the next state the
+  // search asks about, so that the search rejects with it too.
+  let late: DecisionsError | null = null;
 
   /** Run the body for `picks`, and record every state along its default continuation. */
   async function run(picks: Picks): Promise<void> {
@@ -245,12 +278,16 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
       const entry = table.get(picks.slice(0, i));
       return entry?.kind === 'branch' ? entry.range : undefined;
     });
-    const replay = new Replay(picks, expected, maxDecisions);
+    const replay = new Replay(picks, expected, maxDecisions, (error) => {
+      late ??= error;
+    });
     let failure: { error: unknown } | null = null;
     try {
       await body(replay);
     } catch (error) {
       failure = { error };
+    } finally {
+      replay.close();
     }
     // A wrong use is the test's error, whatever the body did with it. It is
     // kept for `getEvents` to throw, on the state that was asked about.
@@ -273,6 +310,7 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
   }
 
   async function entryFor(picks: Picks): Promise<Entry> {
+    if (late !== null) return { kind: 'harness', error: late };
     const known = table.get(picks);
     if (known !== undefined) return known;
     await run(picks);
@@ -301,7 +339,7 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
     applyEvent: (state, pick) => ({ to: stateOf([...picksOf(state), pick]) }),
     describeEvent(pick, state) {
       const entry = table.get(picksOf(state));
-      return entry?.kind === 'branch' ? entry.describe(pick) : `picked ${pick} of ?`;
+      return entry?.kind === 'branch' ? entry.describe(pick) : `picked ${pick}`;
     },
     describeState: (state) => `decisions [${picksOf(state).join(', ')}]`,
     report: options?.report ?? { steps: 'charged' },
@@ -328,17 +366,20 @@ export function decisionsOf(violation: ViolationPath<unknown, unknown> | Violati
  * Run `body` once, with `decisions` replayed and 0 answered to every
  * decision after them: the way to see a reported failure again, under a
  * debugger. Takes the decisions, or the violation or `ViolationError` they
- * are in. Rejects with what the body throws.
+ * are in. Rejects with what the body throws, or with a `DecisionsError` as
+ * a search would, `maxDecisions` included.
  */
 export async function runOnce(
   body: DecisionBody,
   decisions: readonly number[] | ViolationPath<unknown, unknown> | ViolationError<unknown, unknown>,
+  options?: Pick<DecisionModelOptions, 'maxDecisions'>,
 ): Promise<void> {
   const picks = Array.isArray(decisions) ? (decisions as readonly number[]) : decisionsOf(decisions as ViolationPath<unknown, unknown>);
-  const replay = new Replay(picks, undefined, Infinity);
+  const replay = new Replay(picks, undefined, capOf(options), () => {});
   try {
     await body(replay);
   } finally {
+    replay.close();
     if (replay.error !== null) throw replay.error;
   }
   if (replay.consulted < picks.length) {

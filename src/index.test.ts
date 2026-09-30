@@ -563,6 +563,26 @@ describe('a callback that throws', () => {
   // A pure model that throws throws again: the next call on the cache must
   // meet the same throw, not find the edge gone and call the search complete.
 
+  it('is an error of the model from applyEvent and the checks, and the failure of the search from getEvents', async () => {
+    // The same throw, from each callback in turn. Three are violations; the fourth rejects the call.
+    const boom = () => {
+      throw new Error('boom');
+    };
+    const base = graph('0', { '0': [['a', [], '1']], '1': [['b', [], 'end']] });
+    for (const model of [
+      { ...base, applyEvent: boom },
+      { ...base, invariant: (s: string) => (s === '1' ? boom() : undefined) },
+      { ...base, terminalInvariant: boom },
+    ]) {
+      const space = await exploreIteratively(model);
+      expect((space.violation!.error as Error).message).toBe('boom');
+    }
+    const cache = new StateSpaceCache({ ...base, getEvents: (s: string) => (s === '1' ? boom() : base.getEvents(s)) });
+    await expect(exploreIteratively(cache)).rejects.toThrow('boom');
+    await expect(exploreIteratively(cache)).rejects.toThrow('boom');
+    expect(cache.errorEdges).toHaveLength(0);
+  });
+
   it('rejects the call, and the next one, at the initial state', async () => {
     const cache = new StateSpaceCache<string, string>({
       initialState: 'start',

@@ -270,6 +270,12 @@ edges deferred during the call go to `deferred`, whether the call returns,
 hits a limit or rejects. The next call resumes after a limit, and meets the
 same throw after a throw.
 
+**Only `getEvents` can make a call reject.** A throw from `applyEvent`,
+`invariant` or `terminalInvariant` is recorded as that edge's or state's
+error (§2.4). A throw from `getEvents` is not caught: it is the model
+saying that the test is wrong, not that the system is, and `decisionModel`
+relies on it (§9.3, D37). That difference is API, and a test pins it.
+
 ---
 
 ## 6. Reading the cache
@@ -455,16 +461,23 @@ decision.
   wrong use of `Decisions` (a range below 1, no alternatives, a replayed
   pick the body does not offer), a body whose decisions have changed (a
   replayed decision has other alternatives than it had, or a run makes
-  fewer decisions than it replays), or a run past `maxDecisions` (10,000
-  by default), which is what keeps a body whose expected run never ends
-  from hanging the search, since no limit of the search can interrupt a
-  run. The first such error is kept by the run's `Decisions`, thrown by
-  every later decision, and recorded on the state once the body is done,
-  whatever the body did with it. `invariant` reports nothing for such a
-  state, and `getEvents`, which the search calls right after, throws it:
-  the one callback whose throw the search does not take for an error of
-  the model (§5), so `check` rejects with it, at once, and the next search
-  meets it again.
+  fewer decisions than it replays), a run past `maxDecisions` (10,000 by
+  default), which is what keeps a body whose expected run never ends from
+  hanging the search, since no limit of the search can interrupt a run, or
+  a decision made once the run is over. The first such error is kept by
+  the run's `Decisions`, thrown by every later decision, and recorded on
+  the state once the body is done, whatever the body did with it.
+  `invariant` reports nothing for such a state, and `getEvents`, which the
+  search calls right after, throws it: the one callback whose throw the
+  search does not take for an error of the model (§5), so `check` rejects
+  with it, at once, and the next search meets it again.
+- **A run is over once the body has returned or its promise has settled.**
+  A decision after that, from work the body left running, is thrown to
+  that work, and remembered by the model, which throws it at the next
+  state any search asks about: the search cannot be told at the moment,
+  but is told at its next step, or at the first step of the next search.
+  A microtask the body queues runs before the run is over, and is a
+  decision of the run.
 - **Labels** are how a pick reads: an alternative's own, or `maybe`'s and
   `integer`'s label for a pick that is not 0 (a function is given the
   pick; words get the pick added above two alternatives), and the pick
