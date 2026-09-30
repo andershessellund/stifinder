@@ -9,24 +9,27 @@
 //   state  = the decisions made so far
 //   event  = the next decision, 0 first, so that any other pick is a
 //            deviation from the expected run
-//   applyEvent(prefix, k) = the state one decision longer; the body is run
-//            with prefix + [k] replayed and 0 answered to every decision
-//            after, and every state along that default continuation is
-//            harvested from the one run
+//   applyEvent(prefix, k) = the state one decision longer, and nothing
+//            more. The body runs when a state is first asked about, by
+//            `invariant` or `getEvents`: with the state's picks replayed
+//            and 0 answered to every decision after, and every state along
+//            that default continuation is harvested from the one run
 //
 // A run that throws attributes the error to the last state it reached,
 // where the model's `invariant` reports it. So a body that throws before
 // its first decision fails at the initial state, and a body that returns a
 // promise is awaited. Neither was so in kilde's adapter, which this is the
-// move of (D36).
+// move of (D36). A run that makes more than `maxDecisions` decisions is
+// cut off, and that is a violation too, on the state the run was for: the
+// body does not end under that schedule.
 //
 // A wrong use of `Decisions`, a body whose decisions change between runs,
-// a run past the decision cap, or a decision made after the run is over is
-// a `DecisionsError`: not a failure of the body, but of the test. It is
-// thrown through the body, remembered if the body catches it, and handed
-// to the search from `getEvents`, the one callback whose throw the search
-// does not take for an error of the model. So `check` rejects with it, at
-// the moment it occurs, or at the next state it asks about (D37).
+// or a decision made after the run is over is a `DecisionsError`: not a
+// failure of the body, but of the test. It is thrown through the body,
+// remembered if the body catches it, and handed to the search from
+// `getEvents`, the one callback whose throw the search does not take for
+// an error of the model. So `check` rejects with it, at the moment it
+// occurs, or at the next state it asks about (D37).
 // ---------------------------------------------------------------------------
 
 import { HashMap } from 'valsem';
@@ -57,7 +60,8 @@ export interface Decisions {
    * Pick an integer in [0, range). 0 is the expected pick; any other is a
    * deviation. `label` says what a pick other than 0 means, in words, for
    * the report of a failing run: "sink pauses after value #2". A function
-   * is given the pick, for ranges above 2. A range of 1 is no decision.
+   * is given every pick, 0 included, and says how it reads. A range of 1
+   * is no decision.
    */
   integer(range: number, label?: DecisionLabel): number;
   /**
@@ -96,10 +100,12 @@ export interface DecisionState {
 
 export interface DecisionModelOptions {
   /**
-   * The most decisions one run of the body may make. Past it the run is a
-   * `DecisionsError`: a body whose expected run never ends would otherwise
-   * hang the search, since no limit of the search can interrupt a run.
-   * Default: 10,000.
+   * The most decisions one run of the body may make. Past it the run is cut
+   * off, and that is a violation on the state the run was for: the body
+   * does not end under that schedule. A run that keeps deciding would
+   * otherwise hang the search, since no limit of the search can interrupt
+   * a run; one that loops, or waits, without deciding still can. Default:
+   * 10,000; `Infinity` for no cap.
    */
   maxDecisions?: number;
   /** How a violation is rendered. Default: the charged steps alone. */
@@ -111,21 +117,26 @@ export interface DecisionModel extends Model<DecisionState, number> {
   /**
    * How many times the body has been run, by every search of this model:
    * what a run finds is kept on the model, so a second search of it reruns
-   * nothing.
+   * nothing. (A copy of the model, `{ ...model }`, keeps the count it was
+   * copied with.)
    */
   readonly runs: number;
 }
 
 /**
  * A wrong use of `Decisions`, a body whose decisions change between runs,
- * a run of the body past `maxDecisions`, or a decision made once the body
- * is done. It is the test that is wrong, not the code under it, so this is
- * never reported as a violation: the search rejects with it.
+ * or a decision made once the body is done. It is the test that is wrong,
+ * not the code under it, so this is never reported as a violation: the
+ * search rejects with it. `decisions` are those of the run it happened in.
  */
 export class DecisionsError extends Error {
-  constructor(message: string) {
-    super(`stifinder: ${message}`);
+  /** The decisions of the run the error happened in, where there was one. */
+  readonly decisions: readonly number[] | undefined;
+
+  constructor(message: string, decisions?: readonly number[]) {
+    super(`stifinder: ${message}${decisions === undefined ? '' : ` (at decisions [${decisions.join(', ')}])`}`);
     this.name = 'DecisionsError';
+    this.decisions = decisions;
   }
 }
 
@@ -134,8 +145,8 @@ const DEFAULT_MAX_DECISIONS = 10_000;
 /** The decision cap an options object gives, checked. */
 function capOf(options: Pick<DecisionModelOptions, 'maxDecisions'> | undefined): number {
   const cap = options?.maxDecisions ?? DEFAULT_MAX_DECISIONS;
-  if (!Number.isInteger(cap) || cap < 1) {
-    throw new RangeError(`stifinder: maxDecisions must be a whole number of 1 or more, not ${String(cap)}`);
+  if (cap !== Infinity && (!Number.isInteger(cap) || cap < 1)) {
+    throw new RangeError(`stifinder: maxDecisions must be a whole number of 1 or more (or Infinity), not ${String(cap)}`);
   }
   return cap;
 }
@@ -179,6 +190,8 @@ class Replay implements Decisions {
   readonly branches: Branch[] = [];
   /** The first wrong use, if any: `run` throws it once the body is done. */
   error: DecisionsError | null = null;
+  /** The cut-off past `maxDecisions`, if it came to that: the run's failure. */
+  cutOff: Error | null = null;
 
   constructor(
     private readonly picks: Picks,
@@ -199,7 +212,7 @@ class Replay implements Decisions {
   }
 
   #fail(message: string): never {
-    this.error ??= new DecisionsError(message);
+    this.error ??= new DecisionsError(message, this.picks);
     throw this.error;
   }
 
@@ -207,14 +220,17 @@ class Replay implements Decisions {
     if (this.#closed) {
       const error = new DecisionsError(
         'the body decided after it was done: work it left running asked for a decision, which no run can replay',
+        this.picks,
       );
       this.onLate(error);
       throw error;
     }
     if (this.error !== null) throw this.error;
+    if (this.cutOff !== null) throw this.cutOff;
     const i = this.#index;
     if (i >= this.maxDecisions) {
-      this.#fail(`the body made more than ${this.maxDecisions} decisions in one run (maxDecisions)`);
+      this.cutOff = new Error(`the body made more than ${this.maxDecisions} decisions in one run, and was cut off (maxDecisions)`);
+      throw this.cutOff;
     }
     this.#index++;
     this.branches.push(branch);
@@ -283,7 +299,10 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
     });
     let failure: { error: unknown } | null = null;
     try {
-      await body(replay);
+      // Through an async function, so that a body that throws before
+      // returning takes the same tick as one that returns: the microtasks
+      // it queued run before the run is over, either way.
+      await (async () => body(replay))();
     } catch (error) {
       failure = { error };
     } finally {
@@ -294,10 +313,17 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
     if (replay.error === null && replay.consulted < picks.length) {
       replay.error = new DecisionsError(
         `the body made ${replay.consulted} decisions, but ${picks.length} had been made before: it is not deterministic`,
+        picks,
       );
     }
     if (replay.error !== null) {
       table.set(picks, { kind: 'harness', error: replay.error });
+      return;
+    }
+    // A run cut off is one that does not end under this schedule: the
+    // failure of the state it was for, whatever the body did with the throw.
+    if (replay.cutOff !== null) {
+      table.set(picks, { kind: 'error', error: replay.cutOff });
       return;
     }
     // States along the default chain: picks, picks + [0], picks + [0, 0], …
@@ -366,8 +392,11 @@ export function decisionsOf(violation: ViolationPath<unknown, unknown> | Violati
  * Run `body` once, with `decisions` replayed and 0 answered to every
  * decision after them: the way to see a reported failure again, under a
  * debugger. Takes the decisions, or the violation or `ViolationError` they
- * are in. Rejects with what the body throws, or with a `DecisionsError` as
- * a search would, `maxDecisions` included.
+ * are in. Rejects with what the body throws; with the cut-off past
+ * `maxDecisions`, as a search would report it; or with a `DecisionsError`
+ * for a decision the body does not offer, or for more decisions given than
+ * a body that ran to its end made. A body that throws before it has made
+ * them all rejects with its own throw, which is what a debugger wants.
  */
 export async function runOnce(
   body: DecisionBody,
@@ -377,12 +406,13 @@ export async function runOnce(
   const picks = Array.isArray(decisions) ? (decisions as readonly number[]) : decisionsOf(decisions as ViolationPath<unknown, unknown>);
   const replay = new Replay(picks, undefined, capOf(options), () => {});
   try {
-    await body(replay);
+    await (async () => body(replay))();
   } finally {
     replay.close();
     if (replay.error !== null) throw replay.error;
+    if (replay.cutOff !== null) throw replay.cutOff;
   }
   if (replay.consulted < picks.length) {
-    throw new DecisionsError(`the body made ${replay.consulted} decisions of the ${picks.length} given`);
+    throw new DecisionsError(`the body made ${replay.consulted} decisions of the ${picks.length} given`, picks);
   }
 }

@@ -199,17 +199,26 @@ have no words of their own. The decisions that led there are
 **`decisionsOf(error)`**, and **`runOnce(body, error)`** runs the body once
 more with exactly those, under a debugger if you like.
 
-Three requirements. The body must make the same decisions given the same
+A run that keeps deciding is cut off past `maxDecisions` (10,000, unless
+`decisionModel` is told otherwise; `Infinity` for no cap), and that is a
+violation like any other, on the state the run was for: the body does not
+end under that schedule. Found after a deviation, it is a livelock the
+search has caught; on the expected run, it is the body. No limit of the
+search can interrupt a run, so a run that loops, or waits, *without*
+deciding is not cut off by anything.
+
+Two requirements. The body must make the same decisions given the same
 answers, since it is run again for every prefix; one whose decisions change
-between runs is rejected. One run of it must end: past `maxDecisions`
-(10,000 unless `decisionModel` is told otherwise) it is cut off, since no
-limit of the search can interrupt a run. And it must not decide once it is
-done, from work it left running: no run could replay that. Any of these, or
-a wrong use of `Decisions`, is a **`DecisionsError`**, never a violation:
-the search rejects with it, whatever the body does with it, and a decision
-made late is thrown to the work that made it and to the next search of the
-model. A body that throws before its first decision, or on the expected
-run, fails like any other, and a rejected promise is the body's failure.
+between runs is rejected. And work the body leaves running, unawaited, must
+not decide: once the body has returned, or its promise has settled, no run
+could replay a decision. Either, or a wrong use of `Decisions`, is a
+**`DecisionsError`**, never a violation: the search rejects with it,
+whatever the body does with it, and it says which run's decisions it
+happened at. A decision made late is thrown to the work that made it, and
+remembered by the model, which rejects the next state a search asks it
+about (a kept cache that already holds everything asks nothing). A body
+that throws before its first decision, or on the expected run, fails like
+any other, and a rejected promise is the body's failure.
 
 ## Reading a result
 

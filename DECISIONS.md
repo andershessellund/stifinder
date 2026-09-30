@@ -649,7 +649,8 @@ the picks made so far, an event the next pick, and a run of the body with a
 state's picks replayed and 0 answered after them records every state along
 that default continuation. A run's failure is reported by `invariant` on
 the state it reached, a promise the body returns is awaited, and a run is
-cut off past `maxDecisions`, 10,000 by default.
+cut off past `maxDecisions`, 10,000 by default, which is a violation on the
+state the run was for.
 
 **Why.** JavaScript cannot capture a continuation, so a body can only be
 put back into a state by running it there again, and the decisions it made
@@ -677,9 +678,16 @@ step allowance bounds it (D31). The body must be deterministic, and is told
 nothing of the search: the harness checks what it can, that a replayed
 decision has the alternatives it had, and that a run makes the decisions it
 replays. No limit of the search can interrupt a run, since a run is one
-call of one callback, so a body whose expected run never ends would hang
-the search; `maxDecisions` is what cuts it off (found in the external
-review of 2026-09-30). A state is a value the caller cannot look into
+call of one callback, so a body that keeps deciding would hang the search;
+`maxDecisions` is what cuts it off (found in the external review of
+2026-09-30), and a run that loops or waits without deciding is beyond any
+limit. **Rejected:** the cut-off as a `DecisionsError`, the first form. A
+run that does not end under its schedule is a fact about the body: after a
+deviation it is a livelock the search has found, and reported as "the test
+is wrong" it came with no path to it (an independent review, the same
+day). It is a violation on the state the run was for, so the path is the prefix and
+not ten thousand zeros, and `runOnce` replays it. A state is a value the
+caller cannot look into
 (`DecisionState`), which leaves its form free: merging states by a
 fingerprint of the world at a decision, if a body can give one, is under
 Open; `decisionsOf` gives the decisions of a violation from its steps'
@@ -690,9 +698,9 @@ events, which stay the picks whatever a state becomes. DESIGN.md §9.3.
 A decision is `maybe(label, { cost })`, whether something unexpected
 happens; `choose(alternatives)`, each alternative a value with a label and
 cost keys; or `integer(range, label?)`, a number below `range`. A wrong use
-of any, a body that is not deterministic, or a run past `maxDecisions` is a
-`DecisionsError`, with which the search rejects. A body is checked as
-`check(decisionModel(body))`; `check` takes no body.
+of any, a body that is not deterministic, or a decision made once the run
+is over is a `DecisionsError`, with which the search rejects. A body is
+checked as `check(decisionModel(body))`; `check` takes no body.
 
 **Why.** An alternative maps one to one onto an `EventDescriptor`: its
 position is the index, and so the deviation, and its keys are the event's
@@ -708,7 +716,9 @@ takes to run the failure again under a debugger; kilde printed them, and
 offered no way to replay.
 
 A `DecisionsError` is the test being wrong, not the code under it, and a
-violation would say the opposite. It escapes the search by way of
+violation would say the opposite. It says which run's decisions it happened
+at, since the harness knows them and the user otherwise could not find the
+run. It escapes the search by way of
 `getEvents`, the one callback whose throw the search does not take for an
 error of the model: the run keeps the first such error, throws it again at
 every later decision, and records it on the state once the body is done,
@@ -719,10 +729,19 @@ and `getEvents`, called on it right after, throws. That asymmetry between
 ("is an error of the model from applyEvent and the checks, and the failure
 of the search from getEvents"). A decision made once the run is over, from
 work the body left running, is thrown to that work and remembered by the
-model, which throws it at the next state a search asks about: the one way
-left to misuse `Decisions` without being told, which the review's second
-round found. `runOnce` has the same cap as a search, since a debugging
-helper that hangs is worse than one that errors.
+model, which throws it at the next state a search asks the model about: the
+one way left to misuse `Decisions` without being told, which the review's
+second round found. A kept cache that already holds everything asks
+nothing, and is not told; that is documented rather than closed, since
+closing it would mean `check` knowing this one kind of model. The body is
+called through an async function, so that one that throws before returning
+takes the tick one that returns does, and the microtasks it queued fall on
+the same side of the run's end either way (the independent review).
+`runOnce` has the same cap as a search, since a debugging helper that hangs
+is worse than one that errors. **Rejected:** `integer(range, label, { cost
+})`, so that kilde's doubles could charge a fault key. For two alternatives
+it is `maybe`; above two, every deviation charging the same keys is the
+narrow case `choose` already covers with keys of its own per alternative.
 
 **Rejected:** `check(body)`, an overload on `typeof subject === 'function'`,
 the first form. A zero-argument function that returns a model type-checks

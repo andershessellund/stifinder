@@ -189,6 +189,24 @@ describe('a body of code, explored through its decisions', () => {
     expect(Object.fromEntries(violation.cost.entries())).toEqual({ fault: 2, [DEVIATIONS_KEY]: 2, [STEPS_KEY]: 2 });
   });
 
+  it('an alternative without a label reads by its number', async () => {
+    const lines = await failure((decide) => {
+      if (decide.choose([{ value: 'a' }, { value: 'b' }]) === 'b') throw new Error('b');
+    });
+    expect(lines).toEqual(['b', '1 deviation, 1 step', '  1. alternative 1  (deviation)', 'in state: decisions [1]']);
+  });
+
+  it("check's own report option comes over the model's", async () => {
+    const model = decisionModel((decide) => {
+      decide.integer(2, 'strays');
+      throw new Error('always');
+    });
+    const error: unknown = await check(model, { maxDeviations: 0, report: { steps: 'all' } }).catch((e: unknown) => e);
+    expect((error as Error).message.split('\n')).toEqual(['always', '0 deviations, 1 step', '  1. strays: no', 'in state: decisions [0]']);
+    const byDefault: unknown = await check(model, { maxDeviations: 0 }).catch((e: unknown) => e);
+    expect((byDefault as Error).message.split('\n')).toEqual(['always', '0 deviations, 1 step', 'in state: decisions [0]']);
+  });
+
   it("the first alternative's cost keys are charged too, on the expected run", async () => {
     const model = decisionModel((decide) => {
       decide.choose([{ value: 'paid', cost: ['coin'] }, { value: 'free' }]);
@@ -259,7 +277,8 @@ describe('a DecisionsError is the test being wrong, and never a violation', () =
     ).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(DecisionsError);
     expect(error).not.toBeInstanceOf(ViolationError);
-    expect((error as Error).message).toMatch(/^stifinder: decision 0 had 2 alternatives before and 3 now: the body is not deterministic$/);
+    expect((error as Error).message).toBe('stifinder: decision 0 had 2 alternatives before and 3 now: the body is not deterministic (at decisions [1])');
+    expect((error as DecisionsError).decisions).toEqual([1]);
     let runs = 0;
     await expect(
       check(
@@ -323,20 +342,6 @@ describe('a DecisionsError is the test being wrong, and never a violation', () =
     ).rejects.toBeInstanceOf(DecisionsError);
   });
 
-  it('a run past maxDecisions, which a body whose expected run never ends would otherwise hang on', async () => {
-    const endless: DecisionBody = (decide) => {
-      for (;;) decide.integer(2);
-    };
-    await expect(check(decisionModel(endless, { maxDecisions: 100 }))).rejects.toThrow(/more than 100 decisions in one run/);
-    // The default is 10,000.
-    const model = decisionModel((decide) => {
-      for (let i = 0; i < 10_000; i++) decide.integer(1);
-      for (let i = 0; i < 10_000; i++) decide.integer(2);
-    });
-    expect(await check(model, { maxDeviations: 0 })).toMatchObject({ violation: null });
-    await expect(check(decisionModel(endless))).rejects.toThrow(/more than 10000 decisions/);
-    expect(() => decisionModel(endless, { maxDecisions: 0 })).toThrow(RangeError);
-  });
 
   it('a decision made once the body is done is thrown to the work that made it, and to the next search of the model', async () => {
     // The body leaves a timer running that decides after the run is over.
@@ -359,13 +364,20 @@ describe('a DecisionsError is the test being wrong, and never a violation', () =
     expect((lateErrors[0] as Error).message).toMatch(/decided after it was done/);
     // The model remembers, and the next search of it rejects at its first step.
     await expect(check(model)).rejects.toBe(lateErrors[0]);
-    // A microtask the body queues runs before its run is over, and is a decision of the run.
+    // A microtask the body queues runs before its run is over, and is a decision of the run,
+    // whether the body then returns or throws.
     const queued = decisionModel((decide) => {
       decide.integer(2);
       queueMicrotask(() => decide.integer(2));
     });
     await check(queued);
     expect(queued.runs).toBe(4);
+    const lines = await failure((decide) => {
+      decide.integer(2);
+      queueMicrotask(() => decide.integer(2));
+      throw new Error('boom');
+    }, { maxDeviations: 0 });
+    expect(lines).toEqual(['boom', '0 deviations, 2 steps', 'in state: decisions [0, 0]']);
   });
 
   it('is met again by the next search of the model, like any callback that throws', async () => {
@@ -373,6 +385,64 @@ describe('a DecisionsError is the test being wrong, and never a violation', () =
     await expect(check(model)).rejects.toBeInstanceOf(DecisionsError);
     await expect(check(model)).rejects.toBeInstanceOf(DecisionsError);
     expect(model.runs).toBe(1);
+  });
+});
+
+describe('a run past maxDecisions is a violation: the body does not end under that schedule', () => {
+  const endless: DecisionBody = (decide) => {
+    for (;;) decide.integer(2);
+  };
+
+  it('on the expected run, with no steps', async () => {
+    const lines = await failure(endless, { maxDecisions: 100 });
+    expect(lines).toEqual([
+      'the body made more than 100 decisions in one run, and was cut off (maxDecisions)',
+      'no steps: the initial state fails',
+      'in state: decisions []',
+    ]);
+  });
+
+  it('after a deviation, with the path to it: a livelock the search found', async () => {
+    // Once a send has failed, the body polls for ever, though every poll succeeds.
+    const livelock: DecisionBody = (decide) => {
+      if (decide.maybe('the send fails', { cost: ['fault'] })) {
+        for (;;) decide.maybe('the poll fails');
+      }
+    };
+    const error = await failing(livelock, { maxDecisions: 50 });
+    expect(error.message.split('\n')).toEqual([
+      'the body made more than 50 decisions in one run, and was cut off (maxDecisions)',
+      '1 deviation, 1 step, fault: 1',
+      '  1. the send fails  (deviation, fault)',
+      'in state: decisions [1]',
+    ]);
+    expect(decisionsOf(error)).toEqual([1]);
+    await expect(runOnce(livelock, error, { maxDecisions: 50 })).rejects.toThrow(/more than 50 decisions/);
+  });
+
+  it('whatever the body does with the cut-off, and the default is 10,000', async () => {
+    const swallowing: DecisionBody = (decide) => {
+      try {
+        for (;;) decide.integer(2);
+      } catch {
+        throw new Error('a failure of my own');
+      }
+    };
+    expect((await failure(swallowing)).at(0)).toMatch(/more than 10000 decisions/);
+    const fits = decisionModel((decide) => {
+      for (let i = 0; i < 10_000; i++) decide.integer(1);
+      for (let i = 0; i < 10_000; i++) decide.integer(2);
+    });
+    expect(await check(fits, { maxDeviations: 0 })).toMatchObject({ violation: null });
+    // Infinity is no cap, as with every other limit. (A run that never ends then never ends.)
+    expect(await check(decisionModel((decide) => decide.integer(2), { maxDecisions: Infinity }))).toMatchObject({ violation: null });
+    expect(() => decisionModel(endless, { maxDecisions: 0 })).toThrow(RangeError);
+  });
+
+  it('runOnce reports it the same way, and takes the cap', async () => {
+    await expect(runOnce(endless, [])).rejects.toThrow(/more than 10000 decisions/);
+    await expect(runOnce(endless, [], { maxDecisions: 3 })).rejects.toThrow(/more than 3 decisions/);
+    await expect(runOnce(endless, [], { maxDecisions: 0 })).rejects.toThrow(RangeError);
   });
 });
 
@@ -408,17 +478,28 @@ describe('runOnce and decisionsOf', () => {
   });
 
   it('rejects a decision the body does not offer, or more decisions than it makes', async () => {
-    await expect(runOnce(body, [1, 3])).rejects.toThrow(/decision 1 has 3 alternatives, and pick 3 is not one of them/);
+    await expect(runOnce(body, [1, 3])).rejects.toThrow(/decision 1 has 3 alternatives, and pick 3 is not one of them \(at decisions \[1, 3\]\)/);
     await expect(runOnce(body, [0, 0, 0])).rejects.toThrow(/made 2 decisions of the 3 given/);
   });
 
-  it('cuts a run off past maxDecisions, as a search would, instead of hanging', async () => {
-    const endless: DecisionBody = (decide) => {
-      for (;;) decide.integer(2);
+  it('a body that throws before it has made all the decisions given rejects with its own throw', async () => {
+    // A search calls this non-deterministic; a debugger wants the failure itself.
+    await expect(runOnce((decide) => {
+      decide.integer(2);
+      throw new Error('mine');
+    }, [0, 0, 0])).rejects.toThrow('mine');
+  });
+
+  it('a failure past the last deviation replays too', async () => {
+    const past: DecisionBody = (decide) => {
+      const strayed = decide.integer(2) === 1;
+      decide.integer(2);
+      decide.integer(2);
+      if (strayed) throw new Error('late consequence');
     };
-    await expect(runOnce(endless, [])).rejects.toThrow(/more than 10000 decisions/);
-    await expect(runOnce(endless, [], { maxDecisions: 3 })).rejects.toThrow(/more than 3 decisions/);
-    await expect(runOnce(endless, [], { maxDecisions: 0 })).rejects.toThrow(RangeError);
+    const error = await failing(past);
+    expect(decisionsOf(error)).toEqual([1, 0, 0]);
+    await expect(runOnce(past, error)).rejects.toThrow('late consequence');
   });
 });
 
