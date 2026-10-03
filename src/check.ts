@@ -13,10 +13,10 @@ export interface CheckOptions extends IterativeOptions {
    * found a violation: reject with an `IncompleteError` (`'throw'`, the
    * default), or resolve with `completed: false` (`'allow'`).
    */
-  incomplete?: 'throw' | 'allow';
+  incomplete?: 'throw' | 'allow' | undefined;
   /** How a `ViolationError` renders the violation, over what the model's
    *  own `report` says. */
-  report?: FormatOptions;
+  report?: FormatOptions | undefined;
 }
 
 /**
@@ -25,7 +25,9 @@ export interface CheckOptions extends IterativeOptions {
  * Rejects with a `ViolationError` if there is a violation, its message the
  * violation rendered by `formatViolation`. Rejects with an `IncompleteError`
  * if a limit cut the search short before one was found, unless
- * `incomplete: 'allow'`. Otherwise resolves with the `StateSpace`.
+ * `incomplete: 'allow'`. Otherwise resolves with the `StateSpace`, which
+ * either error carries too, as `space`: a test that reports what a search
+ * did has it whether the search passed or failed.
  *
  * A search that resolves has cleared its budget. It has cleared the model
  * only if the result is `exhaustive`: a test that means a proof asserts
@@ -43,7 +45,7 @@ export async function check<State, Event>(
   }
   const space = await exploreIteratively(subject, options);
   if (space.violation !== null) {
-    throw new ViolationError(space.violation, subject instanceof StateSpaceCache ? subject.model : subject, options?.report);
+    throw new ViolationError(space.violation, subject instanceof StateSpaceCache ? subject.model : subject, options?.report, space);
   }
   if (!space.completed && incomplete === 'throw') throw new IncompleteError(space);
   return space;

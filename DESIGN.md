@@ -389,7 +389,8 @@ compute nothing, and only traverse what the cache holds (D31).
   the search completed.
 - A search cut short by `maxEdges` or `timeoutMs` with nothing found rejects
   with an `IncompleteError`, unless `incomplete: 'allow'`.
-- Anything else resolves with the `StateSpace`.
+- Anything else resolves with the `StateSpace`, which either error carries
+  too, as `space`.
 
 Resolving says the budget is clear, no more (§8). A search bounded on
 purpose, by `maxDeviations` or a step allowance, resolves; where a test
@@ -416,9 +417,11 @@ else as JSON. A failure being reported is never hidden by the reporting of
 it. The text is for people, and its wording is not API. Why: D28, D35.
 
 A `ViolationError` has the report as its message, the path as `violation`,
-and the model's error as `cause`. An `IncompleteError` says which limit
+the model's error as `cause`, and the result of the search as `space`
+(none, when it is made by hand). An `IncompleteError` says which limit
 stopped the search, how many edges it had computed, and the highest
-deviation budget it completed.
+deviation budget it completed, and carries the result as far as it got as
+`space`.
 
 With `steps: 'charged'` the report lists only the steps charged something
 besides the step itself, under their own numbers. The options come from
