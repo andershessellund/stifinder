@@ -8,6 +8,11 @@
 * stifinder runs on valsem 0.1, and the peer range is >=0.1.0 <0.2 ([#26](https://github.com/andershessellund/stifinder/issues/26))
 * a budget bounds only the keys it names: a missing allowance is no limit, where it was zero
 * explore(cache, {}) and exploreOnce(model, {}) now explore everything, deviations included, and exploreIteratively without a baseBudget allows any amount of the model's own cost keys. To allow none of a key, name it with 0.
+* every cost vector holds `__steps__` (exported as `STEPS_KEY`), one per event, beside `__deviations__`: code that compares, sums or lists the keys of a cost sees it. A model's own keys are those that are neither.
+* `exhaustive` and `maxDeviationsReached` can land one deviation budget later than in 0.1.0. A state reached in fewer steps by more deviations is now an arrival of its own, so a search has one more level to drain before nothing is left: for the dining philosophers example at five seats, lowest-first, `maxDeviationsReached` goes from 4 to 5, and on the left-first deadlock found at budget 4, `exhaustive` is false where it was true. A test that asserts either number against a kept value needs the new one.
+* a model's successor states are interned, and so frozen, as the initial state already was. A model that mutated a state it was given after the first step corrupted the cache silently in 0.1.0; it fails at that step now (the fix listed below).
+
+*(The three entries above were added after the release: the review of 0.2.0 found them missing.)*
 
 ### Features
 
@@ -22,7 +27,7 @@
 
 ### Bug Fixes
 
-* a decision state is a ValueList, so a long run is linear and not quadratic ([#25](https://github.com/andershessellund/stifinder/issues/25)) ([6f8a4a1](https://github.com/andershessellund/stifinder/commit/6f8a4a1a85d71a6465773add73eaf4d80e422906))
+* a decision state is a ValueList, so a long run is linear and not quadratic (in `decisionModel`, which is new in this release) ([#25](https://github.com/andershessellund/stifinder/issues/25)) ([6f8a4a1](https://github.com/andershessellund/stifinder/commit/6f8a4a1a85d71a6465773add73eaf4d80e422906))
 * budgets and limits are checked, and NaN or a negative value is a RangeError instead of being read as no limit or as zero ([6587c66](https://github.com/andershessellund/stifinder/commit/6587c66e97766c8892057232f55353769d54df3a))
 * exploreIteratively's edgesAddedThisRun counts the whole run, as maxEdges does ([6587c66](https://github.com/andershessellund/stifinder/commit/6587c66e97766c8892057232f55353769d54df3a))
 * shortestViolation ends on any budget, an unbounded one included ([6587c66](https://github.com/andershessellund/stifinder/commit/6587c66e97766c8892057232f55353769d54df3a))
