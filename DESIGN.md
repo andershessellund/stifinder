@@ -438,11 +438,12 @@ charges the cost keys of its alternative (the first alternative's are
 charged on the expected run). A range of 1, or a single alternative, is no
 decision.
 
-- **A state is the decisions made so far**, an interned array of picks. It
-  is opaque to a caller (`DecisionState`); `describeState` renders it as
-  `decisions [0, 0, 1]`, and `decisionsOf` gives the picks of a violation,
-  from its steps' events. **An event is the next pick.**
-- **`applyEvent(prefix, k)`** is `prefix + [k]`, and computes nothing.
+- **A state is the decisions made so far**, a valsem `ValueList` of picks,
+  so that one decision more is a push and hashing a state is O(1) however
+  deep it is. It is opaque to a caller (`DecisionState`); `describeState`
+  renders it as `decisions [0, 0, 1]`, and `decisionsOf` gives the picks of
+  a violation, from its steps' events. **An event is the next pick.**
+- **`applyEvent(prefix, k)`** is `prefix.push(k)`, and computes nothing.
 - **A run is made when a state is first asked about**, by `invariant` or
   `getEvents`: the body runs with the state's picks replayed and 0
   answered to every decision after them. That run reaches, and records on
