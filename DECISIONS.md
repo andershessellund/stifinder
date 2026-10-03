@@ -745,9 +745,32 @@ of the search from getEvents"). A decision made once the run is over, from
 work the body left running, is thrown to that work and remembered by the
 model, which throws it at the next state a search asks the model about: the
 one way left to misuse `Decisions` without being told, which the review's
-second round found. A kept cache that already holds everything asks
-nothing, and is not told; that is documented rather than closed, since
-closing it would mean `check` knowing this one kind of model. The body is
+second round found. That next state is the next search's. A run is complete
+on the microtask queue, and a search is one chain of runs, so a timer a
+body sets fires only once the search is over, whatever the size of the
+search (4,096 runs each leaving a `setTimeout(…, 0)`: none fired before
+`check` resolved); the search a decision was late for resolves, and only a
+later search of the model rejects. The first form of this entry said the
+search would be told "at its next step", with a kept cache that holds
+everything as the one exception, and the external review of 0.2.0
+(2026-10-03) read that as a false proof. It is not one the search can
+close: a timer is not a thing a body sets but a thing it models, as a
+decision of a double today and through a host in the proposal under Open,
+and a body that sets one has left the model, as one that reads a clock has
+(D1). What the search can say is the rule, and it does, in the README and
+DESIGN.md §9.3, in place of a claim that was not true. **Rejected:** a
+hook on `Model`, awaited once a search is over, under which the body's
+model took one turn of the event loop and threw what had decided within it
+(the first form of PR #28, after the review's suggestion). It would catch
+a `setTimeout` of 0 and not one of 100 ms, and so bless the rest; it
+treated a body outside the model as something the search should tolerate;
+and it put a member on `Model`, and a guard against faked timers, for
+that accommodation alone. **Rejected:** throwing the late error from a
+fresh macrotask as well, so that it is an unhandled error whatever the late
+work does with it: a process-wide side effect of the kind D29 keeps out,
+for the same body that has left the model. Test: "a decision made once
+the body is done is thrown to the work that made it, and to the next
+search of the model". The body is
 called through an async function, so that one that throws before returning
 takes the tick one that returns does, and the microtasks it queued fall on
 the same side of the run's end either way (the independent review).
@@ -772,6 +795,15 @@ for `integer` and `maybe` says what a pick other than 0 means, as kilde's
 did, so a full report reads "the send fails: no" for the expected pick;
 `choose` names every alternative. Tests: `a DecisionsError is the test
 being wrong, and never a violation`. DESIGN.md §9.3.
+
+A single alternative is no decision, as a range of 1 is, unless it lists a
+cost: then it is a step that charges it. The first form returned it
+without a decision whatever it listed, so a lone `{ cost: ['crash'] }`
+charged nothing and a budget of no crashes let the run through it (found
+by the external review of 0.2.0, 2026-10-03). A lone alternative is what a
+list built from the system's state comes to when that state offers one
+thing, and the budget must hold for it as for two. Test: "a single
+alternative that lists a cost is a step that charges it".
 
 ### D29. Notes reach the recorder through an argument
 

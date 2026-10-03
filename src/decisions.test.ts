@@ -233,10 +233,24 @@ describe('a body of code, explored through its decisions', () => {
   it('a single alternative, or a range of 1, is no decision', async () => {
     const model = decisionModel((decide) => {
       expect(decide.choose([{ value: 'only' }])).toBe('only');
+      expect(decide.choose([{ value: 'only', cost: [] }])).toBe('only');
       expect(decide.integer(1)).toBe(0);
     });
     const space = await check(model);
     expect([model.runs, space.costs.size]).toEqual([1, 1]);
+  });
+
+  it('a single alternative that lists a cost is a step that charges it', async () => {
+    // Returned without a decision, as it was, a lone crash cost nothing, and a
+    // budget of no crashes let the run through it.
+    const body: DecisionBody = (decide) => {
+      decide.choose([{ value: 'down', label: 'the node crashes', cost: ['crash'] }]);
+      throw new Error('after the crash');
+    };
+    const space = await check(decisionModel(body), { baseBudget: { crash: 0 } });
+    expect(space).toMatchObject({ violation: null, completed: true, exhaustive: false });
+    expect(space.costs.size).toBe(1); // the start, and nothing past the crash
+    expect(await failure(body)).toEqual(['after the crash', '0 deviations, 1 step, crash: 1', '  1. the node crashes  (crash)', 'in state: decisions [0]']);
   });
 
   it('is a model like any other: the picks are the events, and the search is the search', async () => {
@@ -344,7 +358,11 @@ describe('a DecisionsError is the test being wrong, and never a violation', () =
 
 
   it('a decision made once the body is done is thrown to the work that made it, and to the next search of the model', async () => {
-    // The body leaves a timer running that decides after the run is over.
+    // The body leaves a timer running that decides after the run is over: a
+    // body that has left the model, since a timer is a decision to model,
+    // not a thing to set. The search runs in microtasks, so it is over
+    // before the timer fires, and resolves: it cannot be told, and the
+    // docs say so. The work that decided is told, and the next search.
     const lateErrors: unknown[] = [];
     const model = decisionModel((decide) => {
       decide.integer(2);
@@ -356,7 +374,6 @@ describe('a DecisionsError is the test being wrong, and never a violation', () =
         }
       }, 0);
     });
-    // The search is over before any timer fires, so this one resolves.
     await check(model, { maxDeviations: 0 });
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(lateErrors).toHaveLength(1);
