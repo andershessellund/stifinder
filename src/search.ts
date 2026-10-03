@@ -122,10 +122,11 @@ export interface Model<State, Event> {
    * deviation-zero baseline; every other event charges one unit of the
    * implicit `__deviations__` key. Every event charges one `__steps__`.
    *
-   * Unlike the other callbacks, a throw here is not taken for an error of
-   * the model: it is the search that fails. The call rejects with it, the
-   * cache stays consistent, and the next call meets the same throw. That is
-   * the way for a model to say that the test itself is wrong.
+   * Unlike `applyEvent` and the checks, a throw here is not taken for an
+   * error of the model: it is the search that fails. The call rejects with
+   * it, the cache stays consistent, and the next call meets the same throw.
+   * That is the way for a model to say that the test itself is wrong (and
+   * `afterSearch`, once the search is over).
    *
    * Must be a pure function of `state`: results are memoized for the
    * lifetime of the cache.
@@ -188,6 +189,16 @@ export interface Model<State, Event> {
    * lists the charged steps alone.
    */
   report?: FormatOptions;
+  /**
+   * Optional: the model's last word. Called once a search is over, by every
+   * call of `explore`, `exploreIteratively` and `exploreOnce`, and so of
+   * `check`, and awaited before the result is returned. Where a model learns
+   * of a failure only after the search has stopped asking it, this is where
+   * it says so. A throw here is the failure of the search, as from
+   * `getEvents`: the call rejects with it, and the cache is as consistent
+   * as after any call.
+   */
+  afterSearch?(): void | Promise<void>;
 }
 
 /** @deprecated The old name of {@link Model}. */
@@ -678,10 +689,12 @@ export async function explore<State, Event>(
 ): Promise<ExploreResult> {
   checkLimits(options);
   const timeoutMs = options?.timeoutMs;
-  return exploreUntil(cache, toBudget(budget), {
+  const result = await exploreUntil(cache, toBudget(budget), {
     maxEdges: options?.maxEdges ?? DEFAULT_MAX_EDGES,
     deadline: timeoutMs === undefined ? undefined : Date.now() + timeoutMs,
   });
+  await cache.model.afterSearch?.();
+  return result;
 }
 
 interface Limits {
@@ -965,6 +978,9 @@ export async function exploreIteratively<State, Event>(
       break;
     }
   }
+
+  // The search is over, however the loop ended: the model has the last word.
+  await cache.model.afterSearch?.();
 
   // `maxDeviations` is at least 0, so the loop ran at least once.
   const analysis = analyzeCache(cache, lastBudget);

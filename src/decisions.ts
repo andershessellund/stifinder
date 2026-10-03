@@ -27,9 +27,13 @@
 // or a decision made after the run is over is a `DecisionsError`: not a
 // failure of the body, but of the test. It is thrown through the body,
 // remembered if the body catches it, and handed to the search from
-// `getEvents`, the one callback whose throw the search does not take for
-// an error of the model. So `check` rejects with it, at the moment it
-// occurs, or at the next state it asks about (D37).
+// `getEvents`, whose throw the search does not take for an error of the
+// model. So `check` rejects with it, at the moment it occurs, or at the
+// next state it asks about (D37). A decision made once the run is over,
+// by work the body left running, mostly comes after the search is over
+// too, since a search of a body that awaits nothing real is one chain of
+// microtasks: so `afterSearch` takes one turn of the event loop, and
+// throws what decided within it (D38).
 // ---------------------------------------------------------------------------
 
 import { HashMap, ValueList } from 'valsem';
@@ -74,7 +78,8 @@ export interface Decisions {
   /**
    * Pick one of `alternatives`, and return its value. The first is the
    * expected pick; any other is a deviation. Each charges the cost keys it
-   * lists. One alternative is no decision.
+   * lists. One alternative is no decision, unless it lists a cost: then it
+   * is a step that charges it.
    *
    * The value comes back as the union of the alternatives' values, `'ok' |
    * 'lost'` for two strings. An array or object value is inferred deeply
@@ -141,6 +146,20 @@ export class DecisionsError extends Error {
 }
 
 const DEFAULT_MAX_DECISIONS = 10_000;
+
+// The timer as it was when this module loaded, so that a test which fakes
+// timers afterwards does not stall the turn below. A sinon fake, which is
+// what vitest and jest install, marks itself with `clock`; one installed
+// before this module loaded is seen, and no turn is taken: nothing real is
+// due under it.
+const setTimeoutAtLoad = globalThis.setTimeout;
+
+/** One turn of the event loop: resolves once everything due before it has
+ *  run, a `setTimeout(…, 0)` set earlier, an immediate, a microtask. */
+function turn(): Promise<void> {
+  if ('clock' in setTimeoutAtLoad) return Promise.resolve();
+  return new Promise((resolve) => setTimeoutAtLoad(resolve, 0));
+}
 
 /** The decision cap an options object gives, checked. */
 function capOf(options: Pick<DecisionModelOptions, 'maxDecisions'> | undefined): number {
@@ -265,7 +284,9 @@ class Replay implements Decisions {
 
   choose<const T>(alternatives: readonly Alternative<T>[]): T {
     if (alternatives.length === 0) this.#fail('choose() needs at least one alternative');
-    if (alternatives.length === 1) return alternatives[0]!.value;
+    // One alternative is no decision, but one that charges is a step: a
+    // budget that allows none of its key must keep the run from it.
+    if (alternatives.length === 1 && !alternatives[0]!.cost?.length) return alternatives[0]!.value;
     const pick = this.#decide({
       kind: 'branch',
       range: alternatives.length,
@@ -288,7 +309,8 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
   let runs = 0;
   // A decision made after a run was over. It is thrown where it is made,
   // to whatever the body left running, and from here at the next state the
-  // search asks about, so that the search rejects with it too.
+  // search asks about, or once the search is over, so that the search
+  // rejects with it too.
   let late: DecisionsError | null = null;
 
   /** Run the body for `picks`, and record every state along its default continuation. */
@@ -377,6 +399,15 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
     },
     describeState: (state) => `decisions [${keyOf(state).toArray().join(', ')}]`,
     report: options?.report ?? { steps: 'charged' },
+    // A search of a body that awaits nothing real is one chain of
+    // microtasks, so a timer a run left behind fires only once the search
+    // is over. One turn of the event loop lets what is due by now fire,
+    // and what it decided is then the search's failure. Work due later is
+    // told only to the next search, if there is one.
+    async afterSearch() {
+      await turn();
+      if (late !== null) throw late;
+    },
     get runs() {
       return runs;
     },

@@ -733,8 +733,8 @@ A `DecisionsError` is the test being wrong, not the code under it, and a
 violation would say the opposite. It says which run's decisions it happened
 at, since the harness knows them and the user otherwise could not find the
 run. It escapes the search by way of
-`getEvents`, the one callback whose throw the search does not take for an
-error of the model: the run keeps the first such error, throws it again at
+`getEvents`, a callback whose throw the search does not take for an error
+of the model: the run keeps the first such error, throws it again at
 every later decision, and records it on the state once the body is done,
 whatever the body did with it; `invariant` reports nothing for that state,
 and `getEvents`, called on it right after, throws. That asymmetry between
@@ -743,11 +743,10 @@ and `getEvents`, called on it right after, throws. That asymmetry between
 ("is an error of the model from applyEvent and the checks, and the failure
 of the search from getEvents"). A decision made once the run is over, from
 work the body left running, is thrown to that work and remembered by the
-model, which throws it at the next state a search asks the model about: the
-one way left to misuse `Decisions` without being told, which the review's
-second round found. A kept cache that already holds everything asks
-nothing, and is not told; that is documented rather than closed, since
-closing it would mean `check` knowing this one kind of model. The body is
+model, which throws it at the next state a search asks the model about, and
+from `afterSearch` once the search is over (D38): the one way left to
+misuse `Decisions` without being told, which the review's second round
+found, and which the first form closed only in part. The body is
 called through an async function, so that one that throws before returning
 takes the tick one that returns does, and the microtasks it queued fall on
 the same side of the run's end either way (the independent review).
@@ -772,6 +771,71 @@ for `integer` and `maybe` says what a pick other than 0 means, as kilde's
 did, so a full report reads "the send fails: no" for the expected pick;
 `choose` names every alternative. Tests: `a DecisionsError is the test
 being wrong, and never a violation`. DESIGN.md §9.3.
+
+A single alternative is no decision, as a range of 1 is, unless it lists a
+cost: then it is a step that charges it. The first form returned it
+without a decision whatever it listed, so a lone `{ cost: ['crash'] }`
+charged nothing and a budget of no crashes let the run through it (found
+by the external review of 0.2.0, 2026-10-03). A lone alternative is what a
+list built from the system's state comes to when that state offers one
+thing, and the budget must hold for it as for two. Test: "a single
+alternative that lists a cost is a step that charges it".
+
+### D38. A model has the last word: `afterSearch`, awaited once a search is over
+
+A model may have `afterSearch()`, called once a search is over, by every
+call of `explore`, `exploreIteratively` and `exploreOnce`, and so of
+`check`, however the search ended, and awaited before the result is
+returned. A throw from it is the failure of the search, as from
+`getEvents`, never a violation. The search of a body uses it to take one
+turn of the event loop and throw a decision made within it by work a run
+left behind.
+
+**Why.** The first form of D37 held that a decision made once a run was
+over would be told to the search "at the next state it asks about", and
+named a kept cache that holds everything as the one case where that is
+never. The external review of 0.2.0 (2026-10-03) showed the ordinary case
+to be the hole: a timer a run leaves behind fires after the search, not
+during it, since a search of a body that awaits nothing real is one chain
+of microtasks, which never yields to a timer, whatever the size of the
+search (4,096 runs each leaving a timer: none fired before `check`
+resolved). So on a fresh model, which is what a test makes, the search was
+never told, `check` resolved `exhaustive: true`, and only a second search
+of the same model rejected; with the late work swallowing the throw, as
+retrying code does, nothing said anything. The claim in the docs held only
+where a later run awaited a real timer while an earlier run's fired.
+Tests: "a decision made once the body is done is thrown to the work that
+made it, and the search rejects with it", "a decision due later than the
+turn is told to the next search of the model, if there is one".
+
+The hole was left open in D37 because closing it meant `check` knowing
+this one kind of model. A hook on the model is the generic form of the
+same thing: the search gives every model the last word, and the body's
+model is the one with something to say. It closes the kept-cache case
+too, since the hook is called whether or not the search asked anything.
+What it catches is bounded: one turn lets a `setTimeout` of 0, an
+immediate and the microtasks they queue fire, with the real timer, which
+is captured when stifinder loads so that a test faking timers afterwards
+does not stall it (a fake installed before is recognised, and no turn is
+taken, since nothing real is due under one); a timer due later is told to
+the next search of the model, if any. That bound is stated, and the
+requirement stands: work the body does not await must not decide. Where
+it is called: at the end of every public search, so that a user deepening
+by hand with `explore` is told as `check` is. **Rejected:** `check`
+yielding a turn itself, for every model, and the harness checking its
+`late` afterwards: `check` would know the harness, which D37 refused, and
+`exploreIteratively` would not be covered. **Rejected:** throwing the late
+error from a fresh macrotask as well, so that it is an unhandled error
+whatever the late work does with it. Loud under any runner, for any delay
+while the process lives, but attributed to no test, and a process-wide
+side effect of the kind D29 keeps out. **Rejected:** a wait of several
+turns, or a configurable one: no number of turns is right, and one turn
+catches what is due. **Cost.** One turn, about a millisecond, per search
+of a body; nothing for a model without the hook. One more optional member
+of `Model`, and a second place besides `getEvents` from which a search can
+reject, which DESIGN.md §5 states. Test, in the search suite: "afterSearch
+is awaited once a search is over, and its throw is the failure of the
+search". DESIGN.md §2.6, §9.3.
 
 ### D29. Notes reach the recorder through an argument
 

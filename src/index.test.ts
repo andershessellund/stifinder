@@ -621,6 +621,43 @@ describe('a callback that throws', () => {
     await expect(explore(cache, {})).rejects.toThrow(/Date/);
     await expect(explore(cache, {})).rejects.toThrow(/Date/);
   });
+
+  it('afterSearch is awaited once a search is over, and its throw is the failure of the search', async () => {
+    // Called once per search: an explore, an exploreIteratively run, an exploreOnce.
+    const calls: string[] = [];
+    let lastWord: Error | null = null;
+    const model: Model<string, string> = {
+      ...graph('0', { '0': [['a', [], '1'], ['b', [], '2']] }),
+      async afterSearch() {
+        calls.push('after');
+        await Promise.resolve();
+        if (lastWord !== null) throw lastWord;
+      },
+    };
+    const cache = new StateSpaceCache({
+      ...model,
+      getEvents: (s: string) => {
+        calls.push(`events ${s}`);
+        return model.getEvents(s);
+      },
+    });
+    expect(await exploreIteratively(cache)).toMatchObject({ exhaustive: true });
+    expect(calls).toEqual(['events 0', 'events 1', 'events 2', 'after']); // after everything, and once for the run
+    calls.length = 0;
+    await explore(cache, {});
+    await exploreOnce(model, {});
+    expect(calls).toEqual(['after', 'after']);
+    // A throw rejects the call: the cache is consistent, and the next call meets it again.
+    lastWord = new Error('a word after the search');
+    await expect(exploreIteratively(cache)).rejects.toThrow('a word after the search');
+    await expect(explore(cache, {})).rejects.toThrow('a word after the search');
+    expect(cache.exhaustive).toBe(true);
+    expect(cache.errorEdges).toHaveLength(0);
+    // Not a violation: it rejects a search that was cut short too.
+    const cut = new StateSpaceCache(model);
+    await expect(exploreIteratively(cut, { maxEdges: 1 })).rejects.toThrow('a word after the search');
+    expect(cut.exhaustive).toBe(false);
+  });
 });
 
 describe('checked input', () => {

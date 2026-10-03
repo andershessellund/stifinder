@@ -71,9 +71,10 @@ declarations (`stripInternal`), so the types a consumer sees are the API
 
 ### 2.1 What a model is
 
-A `Model<State, Event>` is eight things, the last five optional. The
-callbacks and checks may return their result or a promise of it (D9); the
-two descriptions return a string, and `report` is a value.
+A `Model<State, Event>` is nine things, the last six optional. The
+callbacks, the checks and the last word may return their result or a
+promise of it (D9); the two descriptions return a string, and `report` is
+a value.
 
 | Part | What it says |
 | --- | --- |
@@ -85,6 +86,7 @@ two descriptions return a string, and `report` is a value.
 | `describeEvent(event, state)` | how an event reads where it is taken, for a report |
 | `describeState(state)` | how a state reads, for a report |
 | `report` | how a violation of the model is rendered, unless the caller says otherwise |
+| `afterSearch()` | the model's last word, once a search is over; a throw is the failure of the search |
 
 ### 2.2 Callbacks are pure, and each result is kept
 
@@ -136,6 +138,18 @@ to `terminalInvariant`; so a step allowance (§3.2) cuts a run short without
 making an end of it. It follows that a model must not offer a fault as a
 state's only event: a run may end there, and nothing checks it. A fault
 goes beside a free event (D7).
+
+### 2.6 The model's last word
+
+`afterSearch()`, optional, is called once a search is over, by every call
+of `explore`, `exploreIteratively` and `exploreOnce`, and so of `check`,
+however the search ended, and is awaited before the result is returned. It
+is where a model says what it could only learn after the search had
+stopped asking it. A throw from it is the failure of the search, as from
+`getEvents` (§5), never a violation: the call rejects with it, the cache is
+as consistent as after any call, and the next call meets it again if the
+model throws it again. The search of a body uses it for a decision made
+too late (§9.3). Why: D38.
 
 ---
 
@@ -270,11 +284,14 @@ edges deferred during the call go to `deferred`, whether the call returns,
 hits a limit or rejects. The next call resumes after a limit, and meets the
 same throw after a throw.
 
-**Only `getEvents` can make a call reject.** A throw from `applyEvent`,
-`invariant` or `terminalInvariant` is recorded as that edge's or state's
-error (§2.4). A throw from `getEvents` is not caught: it is the model
-saying that the test is wrong, not that the system is, and `decisionModel`
-relies on it (§9.3, D37). That difference is API, and a test pins it.
+**Only `getEvents` and `afterSearch` can make a call reject.** A throw from
+`applyEvent`, `invariant` or `terminalInvariant` is recorded as that edge's
+or state's error (§2.4). A throw from `getEvents` is not caught: it is the
+model saying that the test is wrong, not that the system is, and
+`decisionModel` relies on it (§9.3, D37). That difference is API, and a
+test pins it. Once the call is over, however it ended, it awaits the
+model's `afterSearch` (§2.6), and a throw from there rejects it the same
+way; `exploreIteratively` does so once, for the whole run (§7).
 
 ---
 
@@ -343,11 +360,12 @@ and `timeoutMs` bound the whole run. It stops when:
   deferred edge needs more than `baseBudget` allows (D19);
 - `maxDeviations` is reached.
 
-It returns the last call's result, the projection at the last budget
-tried, `maxDeviationsReached` (the highest budget that completed, −1 if
-none), and the edges computed by the whole run. Given a model, it uses a
-cache of its own; given a cache, the caller keeps it to resume or to
-analyze other budgets.
+It then awaits the model's `afterSearch`, once for the run (§2.6), and
+returns the last call's result, the projection at the last budget tried,
+`maxDeviationsReached` (the highest budget that completed, −1 if none),
+and the edges computed by the whole run. Given a model, it uses a cache of
+its own; given a cache, the caller keeps it to resume or to analyze other
+budgets.
 
 `exploreOnce(model, budget, options)` is one `explore` and one
 `analyzeCache` on a cache it discards.
@@ -436,7 +454,9 @@ and cost keys of its own, `integer(range, label?)` which number below
 `range`. The first pick is the expected one; any other is a deviation, and
 charges the cost keys of its alternative (the first alternative's are
 charged on the expected run). A range of 1, or a single alternative, is no
-decision.
+decision, unless the alternative lists a cost: then it is a step that
+charges it, which a budget that allows none of that key keeps the run
+from.
 
 - **A state is the decisions made so far**, a valsem `ValueList` of picks,
   so that one decision more is a push and hashing a state is O(1) however
@@ -476,30 +496,37 @@ decision.
   is kept by the run's `Decisions`, thrown by every later decision, and
   recorded on the state once the body is done, whatever the body did with
   it. `invariant` reports nothing for such a state, and `getEvents`, which
-  the search calls right after, throws it: the one callback whose throw
-  the search does not take for an error of the model (§5), so `check`
-  rejects with it, at once, and the next search meets it again.
+  the search calls right after, throws it: a throw the search does not
+  take for an error of the model (§5), so `check` rejects with it, at
+  once, and the next search meets it again.
 - **A run is over once the body has returned or its promise has settled**,
   and the body is called through an async function so that a throw takes
   the same tick as a return. A decision after that, from work the body
   left running, is thrown to that work, and remembered by the model, which
-  throws it at the next state any search asks the model about: the search
-  cannot be told at the moment, but is told at its next step, or at the
-  first step of the next search that asks anything (a kept cache that
-  already holds everything asks nothing, and is not told). Work the body
-  does not await must therefore not decide. That a microtask the body
+  throws it at the next state any search asks it about, and from
+  `afterSearch` once the search is over (§2.6). A search of a body that
+  awaits nothing real is one chain of microtasks, so a timer a run leaves
+  behind fires only after the search, whatever its size: `afterSearch`
+  takes one turn of the event loop, within which everything due by then
+  fires (a `setTimeout` of 0, an immediate, a microtask), and then throws
+  what decided. Work due later is told only to the next search of the
+  model, if there is one, and a body that does not await its work must not
+  let it decide. The turn is taken with the timer as it was when stifinder
+  loaded, so a test that fakes timers afterwards does not stall it; timers
+  faked before are seen, and no turn is taken. That a microtask the body
   queues still runs before the run is over, and counts as a decision of
   the run, is an accident of where the `await` falls, not a promise.
-- **Labels** are how a pick reads: an alternative's own, or `maybe`'s and
-  `integer`'s label for a pick that is not 0 (a function is given the
-  pick; words get the pick added above two alternatives), and the pick
-  itself otherwise.
+- **Labels** are how a pick reads: an alternative's own, or `alternative
+  k` without one; `maybe`'s and `integer`'s label for a pick that is not 0
+  (a function is given the pick; words get the pick added above two
+  alternatives), `label: no` for the pick 0 of a labelled decision, and
+  `picked k of n` for an unlabelled one.
 - **The model's `report`** asks for the charged steps alone (§9.2).
 
 `runOnce(body, decisions)` runs the body once with those decisions
 replayed, or with a violation's, for seeing a reported failure again; a
 decision the body does not offer, or more decisions than it makes, is a
-`DecisionsError`. Why: D36, D37.
+`DecisionsError`. Why: D36, D37, D38.
 
 ---
 
