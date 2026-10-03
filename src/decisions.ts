@@ -119,6 +119,10 @@ export interface DecisionModelOptions {
 
 /** The model of a body, as `decisionModel` builds it. */
 export interface DecisionModel extends Model<DecisionState, number> {
+  /** The body it is the model of: what `runOnce` runs, given the model. */
+  readonly body: DecisionBody;
+  /** The most decisions one run may make, as the model was built with it. */
+  readonly maxDecisions: number;
   /**
    * How many times the body has been run, by every search of this model:
    * what a run finds is kept on the model, so a second search of it reruns
@@ -397,7 +401,7 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
       const entry = table.get(keyOf(state));
       return entry?.kind === 'branch' ? entry.describe(pick) : `picked ${pick}`;
     },
-    describeState: (state) => `decisions [${keyOf(state).toArray().join(', ')}]`,
+    describeState: (state) => describeDecisions(keyOf(state).toArray()),
     report: options?.report ?? { steps: 'charged' },
     // A search of a body that awaits nothing real is one chain of
     // microtasks, so a timer a run left behind fires only once the search
@@ -408,11 +412,33 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
       await turn();
       if (late !== null) throw late;
     },
+    body,
+    maxDecisions,
     get runs() {
       return runs;
     },
   };
   return model;
+}
+
+/**
+ * How a state reads: `decisions [0, 1, 0]`, with a run of more than three
+ * equal picks as one, `decisions [1, 0 ×6999]`. A long run would otherwise
+ * be a line of kilobytes, and the report lists its charged steps already;
+ * `decisionsOf` is the form a program wants.
+ */
+function describeDecisions(picks: readonly number[]): string {
+  const parts: string[] = [];
+  for (let i = 0; i < picks.length; ) {
+    const pick = picks[i]!;
+    let end = i + 1;
+    while (end < picks.length && picks[end] === pick) end++;
+    const length = end - i;
+    if (length > 3) parts.push(`${pick} ×${length}`);
+    else for (let k = 0; k < length; k++) parts.push(String(pick));
+    i = end;
+  }
+  return `decisions [${parts.join(', ')}]`;
 }
 
 /**
@@ -428,22 +454,25 @@ export function decisionsOf(violation: ViolationPath<unknown, unknown> | Violati
 }
 
 /**
- * Run `body` once, with `decisions` replayed and 0 answered to every
+ * Run a body once, with `decisions` replayed and 0 answered to every
  * decision after them: the way to see a reported failure again, under a
- * debugger. Takes the decisions, or the violation or `ViolationError` they
- * are in. Rejects with what the body throws; with the cut-off past
- * `maxDecisions`, as a search would report it; or with a `DecisionsError`
- * for a decision the body does not offer, or for more decisions given than
- * a body that ran to its end made. A body that throws before it has made
- * them all rejects with its own throw, which is what a debugger wants.
+ * debugger. Takes the body, or its model, which runs the body with the
+ * `maxDecisions` it was built with; and the decisions, or the violation or
+ * `ViolationError` they are in. Rejects with what the body throws; with
+ * the cut-off past `maxDecisions`, as a search would report it; or with a
+ * `DecisionsError` for a decision the body does not offer, or for more
+ * decisions given than a body that ran to its end made. A body that throws
+ * before it has made them all rejects with its own throw, which is what a
+ * debugger wants.
  */
 export async function runOnce(
-  body: DecisionBody,
+  subject: DecisionBody | DecisionModel,
   decisions: readonly number[] | ViolationPath<unknown, unknown> | ViolationError<unknown, unknown>,
   options?: Pick<DecisionModelOptions, 'maxDecisions'>,
 ): Promise<void> {
+  const [body, cap] = typeof subject === 'function' ? [subject, capOf(options)] : [subject.body, capOf({ maxDecisions: options?.maxDecisions ?? subject.maxDecisions })];
   const picks = Array.isArray(decisions) ? (decisions as readonly number[]) : decisionsOf(decisions as ViolationPath<unknown, unknown>);
-  const replay = new Replay(picks, undefined, capOf(options), () => {});
+  const replay = new Replay(picks, undefined, cap, () => {});
   try {
     await (async () => body(replay))();
   } finally {
