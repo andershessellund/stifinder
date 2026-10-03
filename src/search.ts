@@ -343,9 +343,9 @@ function withinBudget(cost: CostVector, budget: BudgetVector): boolean {
  * (interned) vector.
  */
 function addCost(base: CostVector, costKeys: readonly string[], chargesDeviation: boolean): CostVector {
-  let result = base.set(STEPS_KEY, (base.get(STEPS_KEY) ?? 0) + 1);
-  for (const k of costKeys) result = result.set(k, (result.get(k) ?? 0) + 1);
-  if (chargesDeviation) result = result.set(DEVIATIONS_KEY, (result.get(DEVIATIONS_KEY) ?? 0) + 1);
+  let result = base.with(STEPS_KEY, (base.get(STEPS_KEY) ?? 0) + 1);
+  for (const k of costKeys) result = result.with(k, (result.get(k) ?? 0) + 1);
+  if (chargesDeviation) result = result.with(DEVIATIONS_KEY, (result.get(DEVIATIONS_KEY) ?? 0) + 1);
   return result;
 }
 
@@ -372,7 +372,7 @@ function isDominated(arrivals: ReadonlyMap<CostVector, unknown>, cost: CostVecto
 /** The componentwise maximum of `a` and `b`. */
 function costMax(a: CostVector, b: CostVector): CostVector {
   let result = a;
-  for (const [k, v] of b.entries()) if (v > (result.get(k) ?? 0)) result = result.set(k, v);
+  for (const [k, v] of b.entries()) if (v > (result.get(k) ?? 0)) result = result.with(k, v);
   return result;
 }
 
@@ -931,17 +931,17 @@ export async function exploreIteratively<State, Event>(
   const cache = cacheOrModel instanceof StateSpaceCache ? cacheOrModel : new StateSpaceCache(cacheOrModel);
   const maxDeviations = options?.maxDeviations ?? DEFAULT_MAX_DEVIATIONS;
   const stopOnViolation = options?.stopOnViolation ?? true;
-  const baseBudget: BudgetVector = toBudget(options?.baseBudget ?? EMPTY_COST).delete(DEVIATIONS_KEY);
+  const baseBudget: BudgetVector = toBudget(options?.baseBudget ?? EMPTY_COST).deleted(DEVIATIONS_KEY);
   const maxEdges = options?.maxEdges ?? DEFAULT_MAX_EDGES;
   const deadline = options?.timeoutMs === undefined ? undefined : Date.now() + options.timeoutMs;
   const edgesAtStart = cache.edgesComputed;
 
   let lastResult: ExploreResult | null = null;
-  let lastBudget: BudgetVector = baseBudget.set(DEVIATIONS_KEY, 0);
+  let lastBudget: BudgetVector = baseBudget.with(DEVIATIONS_KEY, 0);
   let maxDeviationsReached = -1;
 
   for (let d = 0; d <= maxDeviations; d++) {
-    const budget: BudgetVector = baseBudget.set(DEVIATIONS_KEY, d);
+    const budget: BudgetVector = baseBudget.with(DEVIATIONS_KEY, d);
     lastBudget = budget;
     const result = await exploreUntil(cache, budget, {
       maxEdges: maxEdges - (cache.edgesComputed - edgesAtStart),

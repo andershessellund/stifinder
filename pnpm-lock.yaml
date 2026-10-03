@@ -131,8 +131,8 @@ importers:
         specifier: ^8.70.0
         version: 8.70.0(eslint@10.11.0(supports-color@7.2.0))(supports-color@7.2.0)(typescript@6.0.3)
       valsem:
-        specifier: ^0.0.4
-        version: 0.0.4
+        specifier: ^0.1.0
+        version: 0.1.0
       vitest:
         specifier: ^5.0.1
         version: 5.0.1(@types/node@22.20.4)(vite@8.3.0(@types/node@22.20.4))
@@ -1048,8 +1048,8 @@ packages:
     resolution: {integrity: sha512-OljLrQ9SQdOUqTaQxqL5dEfZWrXExyyWsozYlAWFawPVNuD83igl7uJD2RTkNMbniIYgt8l81eCJGIdQF7avLQ==}
     engines: {node: ^14.17.0 || ^16.13.0 || >=18.0.0}
 
-  valsem@0.0.4:
-    resolution: {integrity: sha512-5dbvHCFpu+U5I8sPBPOM7VSyUdRtgtroO4Rh+5z6kixd/Uyf2GdihYajkdwLP/sOyYrhVMt65kkdKYqlrhC4Vw==}
+  valsem@0.1.0:
+    resolution: {integrity: sha512-wOdZvcvAhcYBYtZ0TxVn1cn/gkcJGxLXyV0/u+9B6yl3lsiL4zoZPhtgwOhfVL0NUAY7RVR79Lwo3xgs1K8+cQ==}
     engines: {node: '>=22'}
 
   vite@8.3.0:
@@ -2010,7 +2010,7 @@ snapshots:
 
   validate-npm-package-name@5.0.1: {}
 
-  valsem@0.0.4: {}
+  valsem@0.1.0: {}
 
   vite@8.3.0(@types/node@22.20.4):
     dependencies:

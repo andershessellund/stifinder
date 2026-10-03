@@ -300,7 +300,7 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
     for (const pick of picks) {
       const entry = table.get(prefix);
       expected.push(entry?.kind === 'branch' ? entry.range : undefined);
-      prefix = prefix.push(pick);
+      prefix = prefix.pushed(pick);
     }
     const replay = new Replay(picks, expected, maxDecisions, (error) => {
       late ??= error;
@@ -338,7 +338,7 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
     let chain = key;
     for (let i = picks.length; i < replay.branches.length; i++) {
       table.set(chain, replay.branches[i]!);
-      chain = chain.push(0);
+      chain = chain.pushed(0);
     }
     table.set(chain, failure === null ? { kind: 'done' } : { kind: 'error', error: failure.error });
   }
@@ -370,7 +370,7 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
       }
       return events;
     },
-    applyEvent: (state, pick) => ({ to: stateOf(keyOf(state).push(pick)) }),
+    applyEvent: (state, pick) => ({ to: stateOf(keyOf(state).pushed(pick)) }),
     describeEvent(pick, state) {
       const entry = table.get(keyOf(state));
       return entry?.kind === 'branch' ? entry.describe(pick) : `picked ${pick}`;

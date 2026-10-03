@@ -535,16 +535,23 @@ deepest-first to not putting interrupted edges back, it fails on every one.
 which also checks `shortestViolation`. **Cost.** About 100 ms for 300
 models per property; more on request (`FUZZ_RUNS`). DESIGN.md §10.
 
-### D26. valsem is a peer dependency, and CI tests its floor (#18)
+### D26. valsem is a peer dependency, its range one minor wide, and CI tests its floor (#18, #26)
 
-The peer range is `>=0.0.3 <1`. A CI job installs the lowest version the
+The peer range is `>=0.1.0 <0.2`. A CI job installs the lowest version the
 range admits, read from `package.json`, and runs the typecheck and the
 tests against it.
 
 **Why.** The cache keys by structural equality, so it must share one valsem
 instance with the model's state and event types. A floor that is declared
-and not tested is a guess. Whether to narrow the range, and whether the job
-is a required check, are under Open.
+and not tested is a guess. Before 1.0, valsem releases a breaking change as
+a new minor: 0.1.0 renamed the edits stifinder makes (`set`, `delete` and
+`push` on a value are `with`, `deleted` and `pushed`), and none of 0.0.x
+has the new names. So the floor moved to 0.1.0, and the range ends before
+the next minor, which may break stifinder in the same way. **Rejected:**
+`<1`, the range until #26: it admitted every later minor of valsem
+untested. **Cost.** Each valsem minor needs a stifinder release that widens
+the range, and raising the floor is a breaking change (CONTRIBUTING.md).
+Whether the job is a required check is under Open.
 
 ## Testing real code
 
@@ -828,9 +835,8 @@ every name is provisional.
 - A deepening policy over steps and deviations together, and a result that
   reports the violations that trade one for the other (D33, D10).
 
-**Undecided, the maintainer's call.** Whether to narrow the valsem peer
-range to `<0.1`, and whether `test (valsem floor)` becomes a required check
-(D26).
+**Undecided, the maintainer's call.** Whether `test (valsem floor)` becomes
+a required check (D26).
 
 **Reasons to record.** Why a deviation is charged whether or not the
 index-0 event is affordable (D3); why the model's own cost keys are

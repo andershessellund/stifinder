@@ -101,8 +101,8 @@ function expectPath<State, Event>(analysis: CacheAnalysis<State, Event>, violati
     expect([step.state, step.cost], `step ${i}`).toEqual([state, cost]);
     const t = analysis.transitions.get(step.state)!.find((t) => t.index === step.index)!;
     expect(t.event, `step ${i}`).toEqual(step.event);
-    for (const key of [STEPS_KEY, ...t.cost]) cost = cost.set(key, (cost.get(key) ?? 0) + 1);
-    if (t.index !== 0) cost = cost.set(DEVIATIONS_KEY, (cost.get(DEVIATIONS_KEY) ?? 0) + 1);
+    for (const key of [STEPS_KEY, ...t.cost]) cost = cost.with(key, (cost.get(key) ?? 0) + 1);
+    if (t.index !== 0) cost = cost.with(DEVIATIONS_KEY, (cost.get(DEVIATIONS_KEY) ?? 0) + 1);
     if (i < violation.steps.length - 1) {
       expect('to' in t, `step ${i} leads on`).toBe(true);
       if ('to' in t) state = t.to;

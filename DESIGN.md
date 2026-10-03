@@ -443,7 +443,7 @@ decision.
   deep it is. It is opaque to a caller (`DecisionState`); `describeState`
   renders it as `decisions [0, 0, 1]`, and `decisionsOf` gives the picks of
   a violation, from its steps' events. **An event is the next pick.**
-- **`applyEvent(prefix, k)`** is `prefix.push(k)`, and computes nothing.
+- **`applyEvent(prefix, k)`** is `prefix.pushed(k)`, and computes nothing.
 - **A run is made when a state is first asked about**, by `invariant` or
   `getEvents`: the body runs with the state's picks replayed and 0
   answered to every decision after them. That run reaches, and records on
