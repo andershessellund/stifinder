@@ -687,10 +687,17 @@ deviation it is a livelock the search has found, and reported as "the test
 is wrong" it came with no path to it (an independent review, the same
 day). It is a violation on the state the run was for, so the path is the
 prefix and not ten thousand zeros, and `runOnce` replays it. A state is a
-value the caller cannot look into (`DecisionState`), which leaves its form
-free: merging states by a fingerprint of the world at a decision, if a body
-can give one, is under
-Open; `decisionsOf` gives the decisions of a violation from its steps'
+valsem `ValueList` of the picks, so a decision more is a push and a state
+hashes and compares in O(1). **Rejected:** a plain array, the first form.
+Each state along a run was a copy of the one before, and interned whole by
+the search and hashed whole by the model's table, so a run of n decisions
+cost O(n²): one run at the default cap took 2.2 s, 4.6 s on CI, where the
+test of the cap timed out (found when the release PR for 0.2.0 failed,
+2026-10-01), and takes 67 ms as a list. Test: "a long run costs what its
+decisions do, not their square". A state is a value the caller
+cannot look into (`DecisionState`), which leaves its form free: merging
+states by a fingerprint of the world at a decision, if a body can give one,
+is under Open; `decisionsOf` gives the decisions of a violation from its steps'
 events, which stay the picks whatever a state becomes. DESIGN.md §9.3.
 
 ### D37. `Decisions` is `maybe`, `choose` and kilde's `integer`; its errors are never the body's failure

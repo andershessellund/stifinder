@@ -439,6 +439,16 @@ describe('a run past maxDecisions is a violation: the body does not end under th
     expect(() => decisionModel(endless, { maxDecisions: 0 })).toThrow(RangeError);
   });
 
+  it('a long run costs what its decisions do, not their square', async () => {
+    // 20,000 decisions take a tenth of a second; as arrays, each state a copy
+    // of the last, they took nine seconds, past the timeout.
+    const long = decisionModel((decide) => {
+      for (let i = 0; i < 20_000; i++) decide.integer(2);
+    }, { maxDecisions: Infinity });
+    expect(await check(long, { maxDeviations: 0 })).toMatchObject({ violation: null });
+    expect(long.runs).toBe(1);
+  });
+
   it('runOnce reports it the same way, and takes the cap', async () => {
     await expect(runOnce(endless, [])).rejects.toThrow(/more than 10000 decisions/);
     await expect(runOnce(endless, [], { maxDecisions: 3 })).rejects.toThrow(/more than 3 decisions/);

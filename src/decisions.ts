@@ -32,7 +32,7 @@
 // occurs, or at the next state it asks about (D37).
 // ---------------------------------------------------------------------------
 
-import { HashMap } from 'valsem';
+import { HashMap, ValueList } from 'valsem';
 import type { EventDescriptor, FormatOptions, Model, ViolationPath } from './search.js';
 import type { ViolationError } from './report.js';
 
@@ -152,8 +152,12 @@ function capOf(options: Pick<DecisionModelOptions, 'maxDecisions'> | undefined):
 }
 
 type Picks = readonly number[];
-const picksOf = (state: DecisionState): Picks => state as unknown as Picks;
-const stateOf = (picks: Picks): DecisionState => picks as unknown as DecisionState;
+/** A state's picks, as a canonical list: one decision more is a push, and
+ *  hashing or comparing it is O(1), where an array is copied and hashed
+ *  whole at every step, which makes a run quadratic in its length (D36). */
+type Key = ValueList<number>;
+const keyOf = (state: DecisionState): Key => state as unknown as Key;
+const stateOf = (key: Key): DecisionState => key as unknown as DecisionState;
 
 /** What a decision point offers: its size, how a pick reads, and what each pick charges. */
 interface Branch {
@@ -280,7 +284,7 @@ class Replay implements Decisions {
  */
 export function decisionModel(body: DecisionBody, options?: DecisionModelOptions): DecisionModel {
   const maxDecisions = capOf(options);
-  const table = new HashMap<Picks, Entry>();
+  const table = new HashMap<Key, Entry>();
   let runs = 0;
   // A decision made after a run was over. It is thrown where it is made,
   // to whatever the body left running, and from here at the next state the
@@ -288,12 +292,16 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
   let late: DecisionsError | null = null;
 
   /** Run the body for `picks`, and record every state along its default continuation. */
-  async function run(picks: Picks): Promise<void> {
+  async function run(key: Key): Promise<void> {
     runs++;
-    const expected = picks.map((_, i) => {
-      const entry = table.get(picks.slice(0, i));
-      return entry?.kind === 'branch' ? entry.range : undefined;
-    });
+    const picks = key.toArray();
+    const expected: (number | undefined)[] = [];
+    let prefix = ValueList.empty<number>();
+    for (const pick of picks) {
+      const entry = table.get(prefix);
+      expected.push(entry?.kind === 'branch' ? entry.range : undefined);
+      prefix = prefix.push(pick);
+    }
     const replay = new Replay(picks, expected, maxDecisions, (error) => {
       late ??= error;
     });
@@ -317,42 +325,42 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
       );
     }
     if (replay.error !== null) {
-      table.set(picks, { kind: 'harness', error: replay.error });
+      table.set(key, { kind: 'harness', error: replay.error });
       return;
     }
     // A run cut off is one that does not end under this schedule: the
     // failure of the state it was for, whatever the body did with the throw.
     if (replay.cutOff !== null) {
-      table.set(picks, { kind: 'error', error: replay.cutOff });
+      table.set(key, { kind: 'error', error: replay.cutOff });
       return;
     }
     // States along the default chain: picks, picks + [0], picks + [0, 0], …
-    let chain = picks;
+    let chain = key;
     for (let i = picks.length; i < replay.branches.length; i++) {
       table.set(chain, replay.branches[i]!);
-      chain = [...chain, 0];
+      chain = chain.push(0);
     }
     table.set(chain, failure === null ? { kind: 'done' } : { kind: 'error', error: failure.error });
   }
 
-  async function entryFor(picks: Picks): Promise<Entry> {
+  async function entryFor(key: Key): Promise<Entry> {
     if (late !== null) return { kind: 'harness', error: late };
-    const known = table.get(picks);
+    const known = table.get(key);
     if (known !== undefined) return known;
-    await run(picks);
-    return table.get(picks)!;
+    await run(key);
+    return table.get(key)!;
   }
 
   const model: DecisionModel = {
-    initialState: stateOf([]),
+    initialState: stateOf(ValueList.empty()),
     // A run's failure is a fact about the state it reached: the initial
     // state included, which is what an error reported on edges cannot say.
     async invariant(state) {
-      const entry = await entryFor(picksOf(state));
+      const entry = await entryFor(keyOf(state));
       return entry.kind === 'error' ? { error: entry.error } : undefined;
     },
     async getEvents(state) {
-      const entry = await entryFor(picksOf(state));
+      const entry = await entryFor(keyOf(state));
       if (entry.kind === 'harness') throw entry.error;
       if (entry.kind !== 'branch') return [];
       const events: EventDescriptor<number>[] = [];
@@ -362,12 +370,12 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
       }
       return events;
     },
-    applyEvent: (state, pick) => ({ to: stateOf([...picksOf(state), pick]) }),
+    applyEvent: (state, pick) => ({ to: stateOf(keyOf(state).push(pick)) }),
     describeEvent(pick, state) {
-      const entry = table.get(picksOf(state));
+      const entry = table.get(keyOf(state));
       return entry?.kind === 'branch' ? entry.describe(pick) : `picked ${pick}`;
     },
-    describeState: (state) => `decisions [${picksOf(state).join(', ')}]`,
+    describeState: (state) => `decisions [${keyOf(state).toArray().join(', ')}]`,
     report: options?.report ?? { steps: 'charged' },
     get runs() {
       return runs;
