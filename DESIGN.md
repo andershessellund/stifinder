@@ -461,8 +461,10 @@ from.
 - **A state is the decisions made so far**, a valsem `ValueList` of picks,
   so that one decision more is a push and hashing a state is O(1) however
   deep it is. It is opaque to a caller (`DecisionState`); `describeState`
-  renders it as `decisions [0, 0, 1]`, and `decisionsOf` gives the picks of
-  a violation, from its steps' events. **An event is the next pick.**
+  renders it as `decisions [0, 0, 1]`, a run of more than three equal picks
+  as one, `decisions [1, 0 ×6999]`, so that the state of a long run is a
+  line and not a page; and `decisionsOf` gives the picks of a violation,
+  from its steps' events. **An event is the next pick.**
 - **`applyEvent(prefix, k)`** is `prefix.pushed(k)`, and computes nothing.
 - **A run is made when a state is first asked about**, by `invariant` or
   `getEvents`: the body runs with the state's picks replayed and 0
@@ -523,9 +525,11 @@ from.
   `picked k of n` for an unlabelled one.
 - **The model's `report`** asks for the charged steps alone (§9.2).
 
-`runOnce(body, decisions)` runs the body once with those decisions
-replayed, or with a violation's, for seeing a reported failure again; a
-decision the body does not offer, or more decisions than it makes, is a
+`runOnce(bodyOrModel, decisions)` runs the body once with those decisions
+replayed, or with a violation's, for seeing a reported failure again, under
+the model's `maxDecisions` given the model (which has `body` and
+`maxDecisions` for that), or the option's, or the default; a decision the
+body does not offer, or more decisions than it makes, is a
 `DecisionsError`. Why: D36, D37, D38.
 
 ---

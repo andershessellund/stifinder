@@ -705,7 +705,13 @@ decisions do, not their square". A state is a value the caller
 cannot look into (`DecisionState`), which leaves its form free: merging
 states by a fingerprint of the world at a decision, if a body can give one,
 is under Open; `decisionsOf` gives the decisions of a violation from its steps'
-events, which stay the picks whatever a state becomes. DESIGN.md §9.3.
+events, which stay the picks whatever a state becomes. `describeState`
+renders a run of more than three equal picks as one, `0 ×6999`: the first
+form listed every pick, which made the "in state" line of a run near the
+cap some 30 KB, under a report whose point is to list the charged steps
+alone (found by the external review of 0.2.0, 2026-10-03); `decisionsOf`
+is the form a program wants, and the text is for people (D35). Test: "a
+run of more than three equal picks reads as one". DESIGN.md §9.3.
 
 ### D37. `Decisions` is `maybe`, `choose` and kilde's `integer`; its errors are never the body's failure
 
@@ -725,9 +731,16 @@ back as the union of the alternatives' values. `integer(range, label)`
 keeps the signature of kilde's oracle, so its test doubles, which take an
 `{ oracle }` with that one method, work against a `Decisions` unchanged.
 The report of a body lists the charged steps alone (D35), and
-`decisionsOf(error)` gives the decisions, which `runOnce(body, error)`
+`decisionsOf(error)` gives the decisions, which `runOnce(model, error)`
 takes to run the failure again under a debugger; kilde printed them, and
-offered no way to replay.
+offered no way to replay. `runOnce` takes the model as well as the body,
+and runs the body under the model's `maxDecisions`: given the body alone,
+a failure that a search with a larger cap had found past the default one
+was cut off on replay (the review of 0.2.0). The model shows its `body`
+and `maxDecisions` for that. **Rejected:** a `runOnce` method on the
+model, which would make the model two things; the free function beside
+`decisionsOf` is the form the README teaches. Test: "given the model, runs
+its body with the cap it was built with".
 
 A `DecisionsError` is the test being wrong, not the code under it, and a
 violation would say the opposite. It says which run's decisions it happened

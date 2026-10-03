@@ -85,6 +85,25 @@ describe('a body of code, explored through its decisions', () => {
     expect(lines).toEqual(['one deviation', '1 deviation, 3 steps', '  3. c strays  (deviation)', 'in state: decisions [0, 0, 1]']);
   });
 
+  it('a run of more than three equal picks reads as one, so the state of a long run is a line and not a page', async () => {
+    const lines = await failure((decide) => {
+      for (let i = 0; i < 3; i++) decide.integer(2);
+      const strayed = decide.integer(2, 'strays') === 1;
+      for (let i = 0; i < 200; i++) decide.integer(2);
+      if (strayed) throw new Error('late consequence');
+    });
+    expect(lines).toEqual(['late consequence', '1 deviation, 204 steps', '    4. strays  (deviation)', 'in state: decisions [0, 0, 0, 1, 0 ×200]']);
+    // Up to three read as they are, which is what decisionsOf gives in any case.
+    const short = await failure(
+      (decide) => {
+        for (let i = 0; i < 3; i++) decide.integer(2);
+        throw new Error('x');
+      },
+      { maxDeviations: 0 },
+    );
+    expect(short.at(-1)).toBe('in state: decisions [0, 0, 0]');
+  });
+
   it('a body that throws before its first decision fails at the initial state', async () => {
     // kilde's adapter passed this as exhaustive: the error had no edge to be reported on.
     const lines = await failure(() => {
@@ -558,6 +577,22 @@ describe('runOnce and decisionsOf', () => {
       applyEvent: () => ({ error: 'always' }),
     });
     expect(() => decisionsOf(other.violation!)).toThrow(DecisionsError);
+  });
+
+  it('given the model, runs its body with the cap it was built with', async () => {
+    // A failure past the default cap was found by a search with a larger one; given the body alone, runOnce cut it off.
+    const long: DecisionBody = (decide) => {
+      for (let i = 0; i < 12_000; i++) decide.integer(2);
+      throw new Error('late failure');
+    };
+    const model = decisionModel(long, { maxDecisions: 20_000 });
+    expect(model).toMatchObject({ body: long, maxDecisions: 20_000 });
+    const error = await failing(long, { maxDecisions: 20_000 });
+    expect(error.message.split('\n').at(-1)).toBe('in state: decisions [0 ×12000]');
+    await expect(runOnce(long, error)).rejects.toThrow(/more than 10000 decisions/);
+    await expect(runOnce(model, error)).rejects.toThrow('late failure');
+    await expect(runOnce(model, error, { maxDecisions: 100 })).rejects.toThrow(/more than 100 decisions/); // the option still wins
+    expect(decisionModel(long).maxDecisions).toBe(10_000);
   });
 
   it('rejects a decision the body does not offer, or more decisions than it makes', async () => {

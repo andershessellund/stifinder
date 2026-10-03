@@ -202,8 +202,10 @@ in state: decisions [1, 1, 1]
 
 A body's report lists the charged steps alone, since the expected steps
 have no words of their own. The decisions that led there are
-**`decisionsOf(error)`**, and **`runOnce(body, error)`** runs the body once
-more with exactly those, under a debugger if you like.
+**`decisionsOf(error)`**, and **`runOnce(model, error)`** runs the body once
+more with exactly those, under a debugger if you like (it takes the body
+too, with a `maxDecisions` of its own where the model's is not the
+default).
 
 A run that keeps deciding is cut off past `maxDecisions` (10,000, unless
 `decisionModel` is told otherwise; `Infinity` for no cap), and that is a
@@ -370,11 +372,12 @@ six.
   `Model<DecisionState, number>`, where a state is the decisions made so far
   and an event the next one; see [Code that decides](#code-that-decides).
   `options` are `maxDecisions`, the most one run may make, and `report`. The
-  model has `runs`, how many times the body has been run, by every search
-  of it. **`decisionsOf(violation)`** gives the decisions of a violation of
-  such a model, from the path or a `ViolationError`; **`runOnce(body,
-  decisions)`** runs the body once with those, or with a violation's, and 0
-  for every decision after.
+  model has `body`, `maxDecisions`, and `runs`, how many times the body has
+  been run, by every search of it. **`decisionsOf(violation)`** gives the
+  decisions of a violation of such a model, from the path or a
+  `ViolationError`; **`runOnce(bodyOrModel, decisions, options?)`** runs
+  the body once with those, or with a violation's, and 0 for every decision
+  after, under the model's `maxDecisions` given the model, or the option's.
 - **`formatViolation(violation, model?, options?)`** renders a violation as
   text: the error, what the path cost, each step with what it was charged
   besides the step itself, and the state that failed a check. It uses the
