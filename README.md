@@ -144,7 +144,10 @@ it('the table never deadlocks', async () => {
   anyway.
 
 Otherwise it resolves with the result. That is a search that cleared its
-budget, which is not yet a proof: the table below says what is.
+budget, which is not yet a proof: the table below says what is. Either
+error carries the result too, as `space`, so a test that reports what a
+search did (how many states, how far) has it whether the search passed or
+failed.
 
 ## Code that decides
 
@@ -436,7 +439,9 @@ number>` values (`BudgetVector`); `toBudget` normalizes either form.
 Every allowance in a budget, and `maxEdges` and `timeoutMs`, must be a
 number, zero or more, with `Infinity` for no limit (in a budget, the same as
 leaving the key out); `maxDeviations` must also be whole. Anything else,
-`NaN` included, is a `RangeError`.
+`NaN` included, is a `RangeError`. An option given as `undefined` is one
+left out, and its type says so, so a wrapper can pass its own optional
+options straight through under `exactOptionalPropertyTypes`.
 
 ## Requirements
 

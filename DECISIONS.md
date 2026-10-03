@@ -478,6 +478,16 @@ unlimited allowance, but for `__deviations__` it was zero, and
 `maxDeviations: -1` still explored budget 0. A limit that cannot be read is
 an error, not a limit read some other way. DESIGN.md §3.2.
 
+An option given as `undefined` is one left out, and every optional field
+of an options object, a descriptor or an alternative says so in its type
+(`maxEdges?: number | undefined`). **Why.** A wrapper passes its own
+optional options straight through, `{ maxEdges: options.maxEdges }`, and
+under `exactOptionalPropertyTypes` a type that only omits the key rejects
+that, though the runtime has always read `undefined` as the default. kilde's
+wrapper is written that way, and compiled only because kilde does not set
+the flag (found by the external review of 0.2.0, 2026-10-03). Test: `check`
+› "an option given as undefined is the default, as one left out is".
+
 ## API surface and verification
 
 ### D22. A cache's working state is internal (#16)
@@ -620,6 +630,21 @@ space too large to finish has to say so, with `incomplete: 'allow'`. A
 violation found by a search that was cut short is thrown like any other,
 though it is only the fewest deviations it guarantees (D10). Tests:
 `check`. DESIGN.md §9.1.
+
+Both errors carry the result of the search as `space`, the `StateSpace`
+that `check` would otherwise have resolved with. **Why.** A wrapper that
+reports what a search did, kilde's `exploreTest` with its runs, states and
+edges, had the result only when the search passed, and nothing when it
+failed, which is when the numbers are wanted (found by the external review
+of 0.2.0, 2026-10-03). `IncompleteError` had carried three of its fields
+already; those stay. **Cost.** vitest serialises every own property of an
+error across its worker boundary, `costs` and `transitions` included:
+measured at about 150 ms more per failure for a space of 16,000 states,
+beside the 150 ms the search took. Its report prints only the message, the
+stack and the cause, so nothing is added to what a failure shows. A
+`ViolationError` made by hand has no space, and says so in its type. Test:
+`check` › "either error carries the result of the search, as check would
+have resolved with it".
 
 ### D35. A report lists every step, in the model's words, with what each was charged
 

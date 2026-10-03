@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import { DEVIATIONS_KEY, STEPS_KEY } from './search.js';
-import type { CostVector, FormatOptions, Model, ViolationPath } from './search.js';
+import type { CostVector, FormatOptions, Model, StateSpace, ViolationPath } from './search.js';
 
 /** The part of a model a report asks: how an event and a state read, and how it wants to be rendered. */
 type Describers<State, Event> = Pick<Model<State, Event>, 'describeEvent' | 'describeState' | 'report'>;
@@ -119,26 +119,39 @@ export function formatViolation<State, Event>(
 
 /**
  * What `check` rejects with when the search finds a violation. Its message
- * is the violation as `formatViolation` renders it, and its `cause` is the
- * error the model gave.
+ * is the violation as `formatViolation` renders it, its `cause` is the
+ * error the model gave, and its `space` is the result of the search, as
+ * `check` would have resolved with it.
  */
 export class ViolationError<State = unknown, Event = unknown> extends Error {
   /** The violation: its steps, cost, error, and `badState` if a state failed a check. */
   readonly violation: ViolationPath<State, Event>;
+  /** The result of the search that found the violation, where `check` made
+   *  the error: what it explored and how far, with `violation` as this one. */
+  readonly space: StateSpace<State, Event> | undefined;
 
-  constructor(violation: ViolationPath<State, Event>, model?: Describers<State, Event>, options?: FormatOptions) {
+  constructor(
+    violation: ViolationPath<State, Event>,
+    model?: Describers<State, Event>,
+    options?: FormatOptions,
+    space?: StateSpace<State, Event>,
+  ) {
     super(formatViolation(violation, model, options), { cause: violation.error });
     this.name = 'ViolationError';
     this.violation = violation;
+    this.space = space;
   }
 }
 
 /**
  * What `check` rejects with when `maxEdges` or `timeoutMs` cut the search
  * short before it found a violation: nothing was found, and not everything
- * within the budget was looked at.
+ * within the budget was looked at. Its `space` is the result of the search
+ * as far as it got, as `check` resolves with it under `incomplete: 'allow'`.
  */
-export class IncompleteError extends Error {
+export class IncompleteError<State = unknown, Event = unknown> extends Error {
+  /** The result of the search that was cut short: what it explored and how far. */
+  readonly space: StateSpace<State, Event>;
   /** True if `timeoutMs` stopped the search, false if `maxEdges` did. */
   readonly timedOut: boolean;
   /** Edges in the cache when the search stopped. */
@@ -146,18 +159,19 @@ export class IncompleteError extends Error {
   /** Highest deviation budget the search completed; -1 if none. */
   readonly maxDeviationsReached: number;
 
-  constructor(result: { timedOut: boolean; edgesComputed: number; maxDeviationsReached: number }) {
+  constructor(space: StateSpace<State, Event>) {
     const cleared =
-      result.maxDeviationsReached < 0
+      space.maxDeviationsReached < 0
         ? 'no deviation budget is clear'
-        : `deviation budgets up to ${result.maxDeviationsReached} are clear`;
+        : `deviation budgets up to ${space.maxDeviationsReached} are clear`;
     super(
-      `stifinder: the search was cut short by ${result.timedOut ? 'timeoutMs' : 'maxEdges'} after ` +
-        `${count(result.edgesComputed, 'edge')}: no violation found, and ${cleared}`,
+      `stifinder: the search was cut short by ${space.timedOut ? 'timeoutMs' : 'maxEdges'} after ` +
+        `${count(space.edgesComputed, 'edge')}: no violation found, and ${cleared}`,
     );
     this.name = 'IncompleteError';
-    this.timedOut = result.timedOut;
-    this.edgesComputed = result.edgesComputed;
-    this.maxDeviationsReached = result.maxDeviationsReached;
+    this.space = space;
+    this.timedOut = space.timedOut;
+    this.edgesComputed = space.edgesComputed;
+    this.maxDeviationsReached = space.maxDeviationsReached;
   }
 }

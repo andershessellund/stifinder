@@ -44,10 +44,10 @@ export type DecisionLabel = string | ((pick: number) => string);
 export interface Alternative<T> {
   value: T;
   /** How picking it reads in a report. */
-  label?: string;
+  label?: string | undefined;
   /** The cost keys picking it charges, one unit per occurrence. The first
    *  alternative's are charged too, on the expected run. */
-  cost?: readonly string[];
+  cost?: readonly string[] | undefined;
 }
 
 /**
@@ -70,7 +70,7 @@ export interface Decisions {
    * and `cost` the keys it charges: `maybe('the send fails', { cost:
    * ['fault'] })`.
    */
-  maybe(label: string, options?: { cost?: readonly string[] }): boolean;
+  maybe(label: string, options?: { cost?: readonly string[] | undefined }): boolean;
   /**
    * Pick one of `alternatives`, and return its value. The first is the
    * expected pick; any other is a deviation. Each charges the cost keys it
@@ -107,9 +107,9 @@ export interface DecisionModelOptions {
    * a run; one that loops, or waits, without deciding still can. Default:
    * 10,000; `Infinity` for no cap.
    */
-  maxDecisions?: number;
+  maxDecisions?: number | undefined;
   /** How a violation is rendered. Default: the charged steps alone. */
-  report?: FormatOptions;
+  report?: FormatOptions | undefined;
 }
 
 /** The model of a body, as `decisionModel` builds it. */
@@ -258,7 +258,7 @@ class Replay implements Decisions {
     return this.#decide({ kind: 'branch', range, describe: describeInteger(label, range), costs: undefined });
   }
 
-  maybe(label: string, options?: { cost?: readonly string[] }): boolean {
+  maybe(label: string, options?: { cost?: readonly string[] | undefined }): boolean {
     const costs = options?.cost === undefined ? undefined : [undefined, options.cost];
     return this.#decide({ kind: 'branch', range: 2, describe: describeInteger(label, 2), costs }) === 1;
   }
