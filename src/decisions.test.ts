@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   type DecisionBody,
   type DecisionState,
+  type Decisions,
   DEVIATIONS_KEY,
   DecisionsError,
   STEPS_KEY,
+  StateSpaceCache,
   ViolationError,
   check,
   decisionModel,
@@ -233,10 +235,24 @@ describe('a body of code, explored through its decisions', () => {
   it('a single alternative, or a range of 1, is no decision', async () => {
     const model = decisionModel((decide) => {
       expect(decide.choose([{ value: 'only' }])).toBe('only');
+      expect(decide.choose([{ value: 'only', cost: [] }])).toBe('only');
       expect(decide.integer(1)).toBe(0);
     });
     const space = await check(model);
     expect([model.runs, space.costs.size]).toEqual([1, 1]);
+  });
+
+  it('a single alternative that lists a cost is a step that charges it', async () => {
+    // Returned without a decision, as it was, a lone crash cost nothing, and a
+    // budget of no crashes let the run through it.
+    const body: DecisionBody = (decide) => {
+      decide.choose([{ value: 'down', label: 'the node crashes', cost: ['crash'] }]);
+      throw new Error('after the crash');
+    };
+    const space = await check(decisionModel(body), { baseBudget: { crash: 0 } });
+    expect(space).toMatchObject({ violation: null, completed: true, exhaustive: false });
+    expect(space.costs.size).toBe(1); // the start, and nothing past the crash
+    expect(await failure(body)).toEqual(['after the crash', '0 deviations, 1 step, crash: 1', '  1. the node crashes  (crash)', 'in state: decisions [0]']);
   });
 
   it('is a model like any other: the picks are the events, and the search is the search', async () => {
@@ -343,10 +359,12 @@ describe('a DecisionsError is the test being wrong, and never a violation', () =
   });
 
 
-  it('a decision made once the body is done is thrown to the work that made it, and to the next search of the model', async () => {
+  it('a decision made once the body is done is thrown to the work that made it, and the search rejects with it', async () => {
     // The body leaves a timer running that decides after the run is over.
+    // No timer fires before the search is over: it is one chain of
+    // microtasks. The search then waits a turn, within which this one fires.
     const lateErrors: unknown[] = [];
-    const model = decisionModel((decide) => {
+    const body: DecisionBody = (decide) => {
       decide.integer(2);
       setTimeout(() => {
         try {
@@ -355,17 +373,57 @@ describe('a DecisionsError is the test being wrong, and never a violation', () =
           lateErrors.push(error);
         }
       }, 0);
-    });
-    // The search is over before any timer fires, so this one resolves.
-    await check(model, { maxDeviations: 0 });
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(lateErrors).toHaveLength(1);
-    expect(lateErrors[0]).toBeInstanceOf(DecisionsError);
-    expect((lateErrors[0] as Error).message).toMatch(/decided after it was done/);
+    };
+    const model = decisionModel(body);
+    const error: unknown = await check(model, { maxDeviations: 0 }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DecisionsError);
+    expect(error).not.toBeInstanceOf(ViolationError);
+    expect((error as Error).message).toMatch(/decided after it was done/);
+    expect(lateErrors).toEqual([error]);
     // The model remembers, and the next search of it rejects at its first step.
-    await expect(check(model)).rejects.toBe(lateErrors[0]);
-    // A microtask the body queues runs before its run is over, and is a decision of the run,
-    // whether the body then returns or throws.
+    await expect(check(model)).rejects.toBe(error);
+    // However large the search: 2^8 runs leave 256 timers, and none fires before the search is over.
+    const swallowing = (decide: Decisions) => () => {
+      try {
+        decide.maybe('late');
+      } catch {
+        // The work that decided late is told; the search is told too.
+      }
+    };
+    const wide = decisionModel((decide) => {
+      for (let i = 0; i < 8; i++) decide.integer(2);
+      setTimeout(swallowing(decide), 0);
+    });
+    await expect(check(wide)).rejects.toThrow(/decided after it was done/);
+    expect(wide.runs).toBe(256);
+    // An immediate is due before the turn too.
+    await expect(
+      check(
+        decisionModel((decide) => {
+          decide.integer(2);
+          setImmediate(swallowing(decide));
+        }),
+      ),
+    ).rejects.toThrow(/decided after it was done/);
+  });
+
+  it('a decision due later than the turn is told to the next search of the model, if there is one', async () => {
+    // The run's `Decisions`, kept for the test to decide with once the search is over.
+    let leaked: Decisions | undefined;
+    const model = decisionModel((decide) => {
+      decide.integer(2);
+      leaked = decide;
+    });
+    const cache = new StateSpaceCache(model);
+    expect(await check(cache)).toMatchObject({ exhaustive: true });
+    expect(() => leaked!.integer(2)).toThrow(DecisionsError);
+    // The cache holds everything, so this search asks the model nothing, and is still told.
+    await expect(check(cache)).rejects.toThrow(/decided after it was done/);
+    await expect(check(model)).rejects.toThrow(/decided after it was done/);
+  });
+
+  it('a microtask the body queues runs before its run is over, and is a decision of the run', async () => {
+    // Whether the body then returns or throws.
     const queued = decisionModel((decide) => {
       decide.integer(2);
       queueMicrotask(() => decide.integer(2));
@@ -378,6 +436,21 @@ describe('a DecisionsError is the test being wrong, and never a violation', () =
       throw new Error('boom');
     }, { maxDeviations: 0 });
     expect(lines).toEqual(['boom', '0 deviations, 2 steps', 'in state: decisions [0, 0]']);
+  });
+
+  it('the turn the search waits is a real one, under faked timers too', async () => {
+    vi.useFakeTimers();
+    try {
+      const model = decisionModel((decide) => {
+        decide.integer(2);
+        setTimeout(() => decide.integer(2), 0); // faked: fires only if the test advances the clock
+      });
+      expect(await check(model)).toMatchObject({ exhaustive: true });
+      expect(() => vi.runAllTimers()).toThrow(DecisionsError); // the timers decide now, and are told
+      await expect(check(model)).rejects.toThrow(/decided after it was done/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('is met again by the next search of the model, like any callback that throws', async () => {

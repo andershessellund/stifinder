@@ -51,8 +51,9 @@ npm install stifinder valsem
 ## The model
 
 You describe a system as a `Model<State, Event>`: an `initialState`, two
-callbacks, two optional checks, and two optional descriptions. The callbacks
-and checks may be synchronous or return a promise.
+callbacks, two optional checks, two optional descriptions, and an optional
+last word. The callbacks, the checks and the last word may be synchronous or
+return a promise.
 
 - **`getEvents(state)`** returns the events worth considering from a state,
   in *preference order*. Index 0 is the baseline, the thing that "should"
@@ -71,6 +72,11 @@ and checks may be synchronous or return a promise.
   optional, say how an event and a state read in a report. A search never
   calls them: only a violation being rendered does, for its own steps.
   **`report`**, optional, says how a violation of the model is rendered.
+- **`afterSearch()`**, optional, is called once a search is over, and
+  awaited before its result is returned. It is where a model says what it
+  could only learn after the search had stopped asking it. A throw from it
+  is the failure of the search, like one from `getEvents`, never a
+  violation. `decisionModel` uses it for a decision made too late.
 
 So an error can come from three places. `applyEvent` is where the system under
 test fails *while doing something*: it threw, and there is no next state.
@@ -215,10 +221,14 @@ could replay a decision. Either, or a wrong use of `Decisions`, is a
 **`DecisionsError`**, never a violation: the search rejects with it,
 whatever the body does with it, and it says which run's decisions it
 happened at. A decision made late is thrown to the work that made it, and
-remembered by the model, which rejects the next state a search asks it
-about (a kept cache that already holds everything asks nothing). A body
-that throws before its first decision, or on the expected run, fails like
-any other, and a rejected promise is the body's failure.
+remembered by the model, which rejects the search at the next state it asks
+about, or once it is over. The search of a body runs in microtasks, so a
+timer a run leaves behind fires only after it; the search then waits one
+turn of the event loop, within which a `setTimeout` of 0 or an immediate
+fires and is caught, and a timer due later is caught only by the next
+search of the same model, if there is one. A body that throws before its
+first decision, or on the expected run, fails like any other, and a
+rejected promise is the body's failure.
 
 ## Reading a result
 
@@ -424,11 +434,11 @@ whichever it is.
 A run that hits a limit reports `completed: false` and leaves the cache
 consistent; the next `explore` on it picks up where it stopped. A throw
 from `applyEvent`, `invariant` or `terminalInvariant` is an error of the
-model, and a violation like any other. A throw from `getEvents` is not: it
-is the search that fails. The call rejects with it, the cache is left just
-as consistent, and the next call meets the same throw. That is how a model
-says the test itself is wrong, as `decisionModel` does with a
-`DecisionsError`.
+model, and a violation like any other. A throw from `getEvents`, or from
+`afterSearch` once the search is over, is not: it is the search that
+fails. The call rejects with it, the cache is left just as consistent, and
+the next call meets the same throw. That is how a model says the test
+itself is wrong, as `decisionModel` does with a `DecisionsError`.
 
 Budgets are accepted as plain objects or as canonical `ValueMap<string,
 number>` values (`BudgetVector`); `toBudget` normalizes either form.
