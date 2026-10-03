@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.2.0](https://github.com/andershessellund/stifinder/compare/v0.1.0...v0.2.0) (2026-10-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* stifinder runs on valsem 0.1, and the peer range is >=0.1.0 <0.2 ([#26](https://github.com/andershessellund/stifinder/issues/26))
+* a budget bounds only the keys it names: a missing allowance is no limit, where it was zero
+* explore(cache, {}) and exploreOnce(model, {}) now explore everything, deviations included, and exploreIteratively without a baseBudget allows any amount of the model's own cost keys. To allow none of a key, name it with 0.
+
+### Features
+
+* `check` runs a search as a test: it rejects with the violation rendered, and when a limit cut the search short ([8ec3bca](https://github.com/andershessellund/stifinder/commit/8ec3bca9407b8d84119f7ad14e10a72f6e833287))
+* a body of code is explored through the decisions it asks for: `decisionModel(body)` with `maybe`, `choose` and `integer`, `decisionsOf`, and `runOnce` to see a failure again ([0a54a64](https://github.com/andershessellund/stifinder/commit/0a54a6477e35555a90369163583252d124a85873))
+* a budget bounds only the keys it names: a missing allowance is no limit, where it was zero ([51faacc](https://github.com/andershessellund/stifinder/commit/51faacc83350f0504a02c48722501c6f3d440b18))
+* a model may describe its events and states, and `formatViolation` renders a violation in those words, with what each step was charged ([8ec3bca](https://github.com/andershessellund/stifinder/commit/8ec3bca9407b8d84119f7ad14e10a72f6e833287))
+* a model may say how its violations are rendered, with `report`; `formatViolation` and `ViolationError` take `{ steps: 'charged' }` to list the charged steps alone ([0a54a64](https://github.com/andershessellund/stifinder/commit/0a54a6477e35555a90369163583252d124a85873))
+* every event costs one `__steps__`, a cost key like any other: a budget can bound the length of a run, and a state reached in fewer steps by more deviations is kept beside the cheaper way to it ([51faacc](https://github.com/andershessellund/stifinder/commit/51faacc83350f0504a02c48722501c6f3d440b18))
+* stifinder runs on valsem 0.1, and the peer range is &gt;=0.1.0 &lt;0.2 ([#26](https://github.com/andershessellund/stifinder/issues/26)) ([060fbd1](https://github.com/andershessellund/stifinder/commit/060fbd1050fb7706033928f1c780417612ddf7f7))
+
+
+### Bug Fixes
+
+* a decision state is a ValueList, so a long run is linear and not quadratic ([#25](https://github.com/andershessellund/stifinder/issues/25)) ([6f8a4a1](https://github.com/andershessellund/stifinder/commit/6f8a4a1a85d71a6465773add73eaf4d80e422906))
+* budgets and limits are checked, and NaN or a negative value is a RangeError instead of being read as no limit or as zero ([6587c66](https://github.com/andershessellund/stifinder/commit/6587c66e97766c8892057232f55353769d54df3a))
+* exploreIteratively's edgesAddedThisRun counts the whole run, as maxEdges does ([6587c66](https://github.com/andershessellund/stifinder/commit/6587c66e97766c8892057232f55353769d54df3a))
+* shortestViolation ends on any budget, an unbounded one included ([6587c66](https://github.com/andershessellund/stifinder/commit/6587c66e97766c8892057232f55353769d54df3a))
+* states and events in results are canonical, like initialState and badState, and a model that mutates a state it is given fails at that step ([6587c66](https://github.com/andershessellund/stifinder/commit/6587c66e97766c8892057232f55353769d54df3a))
+
+
+### Performance Improvements
+
+* explore takes each depth in turn instead of searching for the next, so a long run is no longer quadratic ([6587c66](https://github.com/andershessellund/stifinder/commit/6587c66e97766c8892057232f55353769d54df3a))
+
 ## [0.1.0](https://github.com/andershessellund/stifinder/compare/v0.0.1...v0.1.0) (2026-09-23)
 
 
