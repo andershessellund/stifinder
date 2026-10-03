@@ -220,6 +220,100 @@ about (a kept cache that already holds everything asks nothing). A body
 that throws before its first decision, or on the expected run, fails like
 any other, and a rejected promise is the body's failure.
 
+## Testing real code
+
+The code under test does not change, and does not know stifinder. It takes
+its dependencies as arguments: a store, a network, a clock. The test hands
+it **doubles**, and every choice a real dependency would leave to chance is,
+in the double, a decision: which waiting request is answered next, whether
+a reply is lost, how far the clock moves. A body then has one shape:
+
+```ts
+const body: DecisionBody = async (decide) => {
+  const world = new SimulatedWorld(decide); // a new world for every run
+  const done = codeUnderTest(world.client()); // starts, and waits on the doubles
+  await world.run(); // deliver until nothing waits: every decision is made here
+  await done;
+  assertEndState(world); // the body's terminalInvariant
+};
+```
+
+An assertion at the end is what a model's `terminalInvariant` is: it tells
+an acceptable end from a lost update or a message never delivered. One
+inside a double, at the moment something goes wrong, is its `invariant`.
+
+What makes such a body explorable:
+
+- **Decide in the doubles, never in the code under test.** The code's
+  nondeterminism is all at its boundary: what comes back, and when. That is
+  where the doubles are.
+- **The expected answer is the uneventful one.** The first alternative, or
+  `maybe` saying no, is what the search tries first and what a report leaves
+  out. Choose it so that a deviation is a real event. For a scheduler, that
+  usually means each party runs on undisturbed (answer the newest request
+  first), not first-come-first-served, under which parties interleave on
+  the expected run and the first bug costs nothing.
+- **A fault has a cost key, and a double offers only the faults a test is
+  about.** `maybe('the reply is lost', { cost: ['lost'] })` lets a budget
+  say "one lost reply". A test that is about something else builds the
+  double without that fault: a budget of `{ lost: 0 }` leaves every such
+  deviation deferred, and the search cannot be `exhaustive`.
+- **Nothing else varies.** No `Date.now()`, `Math.random()`, real timers or
+  real I/O, in the code or the doubles. A clock is a double, and time
+  passing is a decision. Randomness the code needs is seeded, or decided
+  with a small range.
+- **A new world for every run.** The body runs again for every prefix it
+  is explored to. Anything that outlives a run, a module-level singleton, a
+  cache, a connection pool, changes what the next run does. If it changes
+  the decisions, that is a `DecisionsError`; if it only changes the outcome,
+  the space explored is wrong, and nothing says so.
+- **Every decision is awaited.** The body drives the doubles itself and
+  waits for them to be quiet. Between decisions it lets the code react, so
+  that a client that got its reply has made its next request before the
+  next pick: a `setImmediate` does, while nothing real is pending. Work
+  left running after the body returns must not decide.
+- **Decisions are coarse.** The space is the tree of decision sequences,
+  and no two sequences are merged (D36 in [DECISIONS.md](DECISIONS.md)), so
+  it grows exponentially with their number. One decision per delivery,
+  not per microtask; a `choose` of one alternative is free. Two or three
+  parties and a few operations each find most of what there is to find.
+  `__steps__` counts decisions, for a bound on the length of a run.
+- **A retry loop needs a budget.** Code that retries a fault forever, given
+  the fault forever, never ends: that run is cut off at `maxDecisions`, and
+  reported. A fault budget keeps the search to what you mean.
+
+Labels are what a report says, so give them in the words of the domain:
+`deliver A: get`, not `pick 1`. To watch the whole failing run, have the
+doubles log what they do and replay it with `runOnce(body, error)`.
+
+### An example: a remote counter
+
+[`examples/remote-counter.ts`](examples/remote-counter.ts) has two clients
+each add one to a counter kept by a remote store. The clients are plain
+async functions over a `Store` interface. The double holds every request
+until its `run` loop delivers it, picking which with `decide.choose`, and
+can lose a reply on the way back with `decide.maybe`. The body runs two
+clients and asserts that the counter reached 2.
+
+```
+$ pnpm build && node examples/remote-counter.ts
+readThenWrite: counted 1, not 2
+1 deviation, 3 steps
+  2. deliver A: get  (deviation)
+in state: decisions [0, 1, 0]
+compareAndSet: correct, every schedule explored.
+compareAndSet, replies lost: counted 3, not 2
+1 deviation, 8 steps, lost: 1
+  6. the reply to A: set 2 if 1 is lost  (deviation, lost)
+in state: decisions [0, 0, 0, 0, 0, 1, 0, 0]
+```
+
+Reading and writing back loses an update as soon as one client reads
+between the other's read and write. Compare-and-set survives every
+interleaving, and the search shows it by exploring them all. Let one reply
+be lost, and the client whose write succeeded unheard tries again, and
+counts twice: the bug an idempotency key is for.
+
 ## Reading a result
 
 A search that finds nothing has cleared a budget, not the model, unless it
