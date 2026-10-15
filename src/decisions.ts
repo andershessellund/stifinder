@@ -30,6 +30,14 @@
 // `getEvents`, the one callback whose throw the search does not take for
 // an error of the model. So `check` rejects with it, at the moment it
 // occurs, or at the next state it asks about (D37).
+//
+// A run is one chain of microtasks, and a search is the chain of its runs:
+// nothing the body hands to the macrotask queue, a timer above all, is
+// part of the run, or of the model. A decision such work makes is thrown
+// to it, and remembered for the next search; the search it was late for
+// is over by then, and is not told. A timer is modelled, as a decision of
+// a double today and through a host in the proposal of DECISIONS.md, not
+// set.
 // ---------------------------------------------------------------------------
 
 import { HashMap, ValueList } from 'valsem';
@@ -74,7 +82,8 @@ export interface Decisions {
   /**
    * Pick one of `alternatives`, and return its value. The first is the
    * expected pick; any other is a deviation. Each charges the cost keys it
-   * lists. One alternative is no decision.
+   * lists. One alternative is no decision, unless it lists a cost: then it
+   * is a step that charges it.
    *
    * The value comes back as the union of the alternatives' values, `'ok' |
    * 'lost'` for two strings. An array or object value is inferred deeply
@@ -265,7 +274,9 @@ class Replay implements Decisions {
 
   choose<const T>(alternatives: readonly Alternative<T>[]): T {
     if (alternatives.length === 0) this.#fail('choose() needs at least one alternative');
-    if (alternatives.length === 1) return alternatives[0]!.value;
+    // One alternative is no decision, but one that charges is a step: a
+    // budget that allows none of its key must keep the run from it.
+    if (alternatives.length === 1 && !alternatives[0]!.cost?.length) return alternatives[0]!.value;
     const pick = this.#decide({
       kind: 'branch',
       range: alternatives.length,
@@ -287,8 +298,9 @@ export function decisionModel(body: DecisionBody, options?: DecisionModelOptions
   const table = new HashMap<Key, Entry>();
   let runs = 0;
   // A decision made after a run was over. It is thrown where it is made,
-  // to whatever the body left running, and from here at the next state the
-  // search asks about, so that the search rejects with it too.
+  // to whatever the body left running, and from here at the next state a
+  // search asks about: the next search's, since the one it was late for
+  // runs in microtasks and is over before anything else gets to run.
   let late: DecisionsError | null = null;
 
   /** Run the body for `picks`, and record every state along its default continuation. */
