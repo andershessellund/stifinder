@@ -94,7 +94,7 @@ export interface FormatOptions {
    * (`'charged'`). The steps keep their numbers, so a listed step still
    * says where in the run it was.
    */
-  steps?: 'all' | 'charged';
+  steps?: 'all' | 'charged' | undefined;
 }
 
 /** One event the caller wants the explorer to consider from a state. */
@@ -106,7 +106,7 @@ export interface EventDescriptor<Event> {
    * `__deviations__` or `__steps__`, which the explorer counts itself; it
    * throws if it does.
    */
-  cost?: readonly string[];
+  cost?: readonly string[] | undefined;
 }
 
 /**
@@ -187,7 +187,7 @@ export interface Model<State, Event> {
    * says otherwise. A model whose expected steps have no words of their own
    * lists the charged steps alone.
    */
-  report?: FormatOptions;
+  report?: FormatOptions | undefined;
 }
 
 /** @deprecated The old name of {@link Model}. */
@@ -285,9 +285,9 @@ export interface StateSpace<State, Event>
 
 export interface ExploreOptions {
   /** Cap on `applyEvent` invocations made by this call. Cache hits are free. Default: 100_000. */
-  maxEdges?: number;
+  maxEdges?: number | undefined;
   /** Wall-clock cap on this call. */
-  timeoutMs?: number;
+  timeoutMs?: number | undefined;
 }
 
 export interface IterativeOptions {
@@ -295,15 +295,15 @@ export interface IterativeOptions {
    *  (one given here is ignored). A key it leaves out is not limited, so
    *  the default, `{}`, bounds nothing: `{ __steps__: 50 }` bounds the
    *  length of a run. */
-  baseBudget?: BudgetLike;
+  baseBudget?: BudgetLike | undefined;
   /** Deepest deviation budget tried. Default: 100. */
-  maxDeviations?: number;
+  maxDeviations?: number | undefined;
   /** Cap on `applyEvent` invocations across all iterations of this run. Default: 100_000. */
-  maxEdges?: number;
+  maxEdges?: number | undefined;
   /** Wall-clock cap on the whole run, across all iterations. */
-  timeoutMs?: number;
+  timeoutMs?: number | undefined;
   /** If true (default), stops at the first iteration exhibiting a violation. */
-  stopOnViolation?: boolean;
+  stopOnViolation?: boolean | undefined;
 }
 
 export const DEFAULT_MAX_EDGES = 100_000;

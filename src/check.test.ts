@@ -48,6 +48,18 @@ describe('check', () => {
     expect((cause as Error).message).toBe('strayed to 2');
   });
 
+  it('either error carries the result of the search, as check would have resolved with it', async () => {
+    // A wrapper that reports what a search did needs it when the search failed too.
+    const failed = (await check(counter(3, 2)).catch((e: unknown) => e)) as ViolationError;
+    expect(failed.space).toMatchObject({ completed: true, maxDeviationsReached: 1, violation: failed.violation });
+    expect(failed.space!.costs.size).toBe(5); // the counts 0 to 3 without straying, and 1 having strayed
+    const cut = (await check(counter(10), { maxEdges: 12 }).catch((e: unknown) => e)) as IncompleteError;
+    expect(cut.space).toMatchObject({ completed: false, edgesComputed: 12, maxDeviationsReached: 0, violation: null });
+    expect(cut.space.costs.size).toBe(13); // the counts 0 to 10 without straying, and 1 and 2 having strayed, where the limit fell
+    // Made by hand, a ViolationError has no space to carry.
+    expect(new ViolationError(failed.violation).space).toBeUndefined();
+  });
+
   it('takes a cache, which the caller keeps', async () => {
     const cache = new StateSpaceCache(counter(3, 2));
     await expect(check(cache)).rejects.toBeInstanceOf(ViolationError);
@@ -100,5 +112,20 @@ describe('check', () => {
 
   it('an `incomplete` it cannot read is an error, not a default', async () => {
     await expect(check(counter(1), { incomplete: 'alow' as 'allow' })).rejects.toThrow(RangeError);
+  });
+
+  it('an option given as undefined is the default, as one left out is', async () => {
+    // So a wrapper may pass its own optional options straight through, under
+    // exactOptionalPropertyTypes too: every option's type admits undefined.
+    const space = await check(counter(3), {
+      baseBudget: undefined,
+      maxDeviations: undefined,
+      maxEdges: undefined,
+      timeoutMs: undefined,
+      stopOnViolation: undefined,
+      incomplete: undefined,
+      report: undefined,
+    });
+    expect(space).toMatchObject({ completed: true, exhaustive: true, maxDeviationsReached: 1 });
   });
 });
