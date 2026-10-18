@@ -563,7 +563,9 @@ to D45.
   their microtasks.
 - **The live runtime** of each part after its last step is kept by the
   system with the value it is at, and resumed when a later step finds the
-  part at that value; otherwise the kind rebuilds one. A step that throws
+  part at that value; otherwise the kind rebuilds one. A step takes a
+  runtime it resumes out of the live cache until its snapshot, so that
+  searches of one system at once each rebuild their own. A step that throws
   forgets the live runtimes it touched, since one it changed before failing
   is at no value. When a step resumed anything and `rebuildCheck` is on
   (the default), the step is run again with every part rebuilt from the
@@ -617,16 +619,18 @@ to D45.
   it, nor out of whatever called the host. A `GET` with a body is the
   code's error, rejected as the platform rejects it. The part's events are
   `start` when not started; `{ fire: id }`, expected, when the head timer
-  is due; else `{ advance: δ }` for each distinct distance among its
-  timers, never expected. An advance subtracts, and is not logged, so
-  histories that differ only in how time moved are one state; a timer
-  that reaches zero is due. Timers are kept by distance and then id,
-  which is due order and registration order at equal dues (the HTML
-  rule); an interval comes back at its period when it fires;
-  `timeoutSignal` is a timer that aborts a signal, dropped once every
-  request it guarded has settled, as the platform's unreferenced timer
-  would be (a signal of the code's own is never dropped). `random` and
-  `uuid` are a seeded stream, from `options.seed` and the part's id, the
+  is due; and `{ advance: δ }` for each distinct distance among its
+  timers, never expected, while a timer is due too, which is its callback
+  running late. An advance subtracts, and is not logged, so histories
+  that differ only in how time moved are one state; a timer that reaches
+  zero is due. Timers are kept in due order, and at equal dues in the
+  order they were set or re-armed (the HTML rule), which a restore keeps;
+  an interval comes back at its period once its callback has run, unless
+  the callback cleared it; `timeoutSignal` is a timer that aborts a
+  signal, unreferenced as the platform's is: it counts down and fires
+  when time reaches it, but an advance goes to its distance only while
+  the part has a request in flight, whichever signal it carries, or a
+  timer due. `random` and `uuid` are a seeded stream, from `options.seed` and the part's id, the
   same on replay, so no draw is logged. A host call outside a step, from
   a real timer above all, is recorded on the kind and answered from
   `fault()`, so the system raises it at its next step, whichever part's;

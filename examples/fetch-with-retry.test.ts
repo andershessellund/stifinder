@@ -4,7 +4,7 @@ import { report } from './fetch-with-retry.js';
 // The README quotes this output; the example is only worth having if it stays true.
 describe('examples/fetch-with-retry', () => {
   it('within as many faults as it retries, the function returns ok and the server counted', async () => {
-    expect(await report(3, 3)).toEqual(['3 retries: holds within 3 faults. 1090 states.']);
+    expect(await report(3, 3)).toEqual(['3 retries: holds within 3 faults. 1409 states.']);
   });
 
   it('one fault more, and it gives up; the report says how', async () => {

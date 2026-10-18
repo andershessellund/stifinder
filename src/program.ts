@@ -15,14 +15,15 @@
 // subtracts, and the clock is never read. The part expects to fire the
 // head of its due queue; its other events are advances to its pending
 // timers' distances, never expected, since time proceeds only when nothing
-// else can happen. The log records which timer fired and never an advance,
-// so histories that differ only in how time moved are one state: a timer
-// is named by an id of its own, and a restore sets the distances from the
-// value. A `timeoutSignal`'s timer is dropped once every request it guarded
-// has settled: the platform does not wait for such a timer, and it could
-// then only abort a signal nobody listens to. Randomness is a seeded
-// stream, seeded by the part's id too, so a replay draws the same numbers
-// and no draw is logged.
+// else can happen — and offered while a timer is due too, since a
+// callback may run late. The log records which timer fired and never an
+// advance, so histories that differ only in how time moved are one state:
+// a timer is named by an id of its own, and a restore sets the distances
+// from the value. A `timeoutSignal`'s timer is unreferenced, as the
+// platform's is: nothing waits for it, so time moves to it only while the
+// part has a request in flight or a timer due, but it counts down, and
+// fires when time reaches it. Randomness is a seeded stream, seeded by the part's id
+// too, so a replay draws the same numbers and no draw is logged.
 //
 // A difference on replay, a request that is not a value, and a host call
 // after the step is over — from a real timer above all — are the test's
@@ -65,11 +66,14 @@ export type ToProgram = { pos: number; response: ResponseValue } | { pos: number
  *  `fired` names the timer by its id. */
 export type LogEntry = { sent: RequestValue } | { aborted: number } | { got: ResponseValue; pos: number } | { failed: string; pos: number } | { fired: number };
 
-/** A pending timer: its id, how far it is from firing, and its period if it repeats. */
+/** A pending timer: its id, how far it is from firing, its period if it
+ *  repeats, and whether it is unreferenced, as a timeout signal's is:
+ *  time moves to it only while a request is in flight or a timer is due. */
 export interface TimerValue {
   id: number;
   distance: number;
   interval?: number | undefined;
+  unref?: true | undefined;
 }
 
 /** What `main` settled with: its value, a `Response` by its status, or its error's message. */
@@ -78,7 +82,7 @@ export type Settled = { value: unknown } | { error: string };
 export interface ProgramValue {
   started: boolean;
   log: ValueList<LogEntry>;
-  /** Pending timers in the order they fire: by distance, then by id, which is registration order. */
+  /** Pending timers in the order they fire: by when they are due, and at equal dues in the order they were set or re-armed. */
   timers: ValueList<TimerValue>;
   result?: Settled | undefined;
 }
@@ -170,7 +174,7 @@ const never = (): Promise<never> => new Promise(() => undefined);
 interface Pending {
   resolve(response: Response): void;
   reject(error: unknown): void;
-  /** Once settled: stops listening for an abort, and lets go of a timeout signal's timer. */
+  /** Once settled: stops listening for an abort. */
   cleanup?: () => void;
 }
 
@@ -179,19 +183,14 @@ interface PendingTimer {
   callback: () => void;
   distance: number;
   interval: number | undefined;
-}
-
-/** The timer behind a `timeoutSignal`, and how many requests it guards. */
-interface Guard {
-  timer: number;
-  uses: number;
+  unref: boolean;
 }
 
 /** The code, running, and the host it runs against. */
 class Runtime {
   started = false;
   log = ValueList.empty<LogEntry>();
-  /** Pending timers, by distance then id. */
+  /** Pending timers, by when they are due, and at equal dues in the order they were set or re-armed. */
   timers: PendingTimer[] = [];
   result: Settled | undefined;
   /** The requests the code waits on, in the order it made them. */
@@ -206,8 +205,9 @@ class Runtime {
   fault: SystemError | undefined;
   readonly host: Host;
   private nextTimer = 1;
+  /** The timer whose callback is running, until the callback clears it. */
+  private firing: PendingTimer | undefined;
   private readonly random: () => number;
-  private readonly guards = new WeakMap<AbortSignal, Guard>();
 
   constructor(
     readonly id: string,
@@ -219,14 +219,13 @@ class Runtime {
     this.random = mulberry32(seedFor(seed, id));
     this.host = {
       fetch: (input, init) => this.fetch(input, init),
-      setTimeout: (callback, ms) => this.add(callback, delayOf(ms), undefined),
+      setTimeout: (callback, ms) => this.add(callback, delayOf(ms), undefined, false),
       clearTimeout: (timer) => this.clear(timer),
-      setInterval: (callback, ms) => this.add(callback, Math.max(1, delayOf(ms)), Math.max(1, delayOf(ms))),
+      setInterval: (callback, ms) => this.add(callback, Math.max(1, delayOf(ms)), Math.max(1, delayOf(ms)), false),
       clearInterval: (timer) => this.clear(timer),
       timeoutSignal: (ms) => {
         const controller = new AbortController();
-        const timer = this.add(() => controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError')), delayOf(ms), undefined);
-        this.guards.set(controller.signal, { timer: timer as unknown as number, uses: 0 });
+        this.add(() => controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError')), delayOf(ms), undefined, true);
         return controller.signal;
       },
       random: () => this.random(),
@@ -296,8 +295,16 @@ class Runtime {
       const timer = this.timers[i];
       if (timer === undefined) throw new SystemError(`${this.id} has no timer ${entry.fired} to fire`);
       this.timers.splice(i, 1);
-      if (timer.interval !== undefined) this.insert({ ...timer, distance: timer.interval });
-      timer.callback();
+      // An interval comes back at its period once its callback has run,
+      // unless the callback cleared it, as the platform re-arms one: a
+      // timer the callback sets for the same period fires first.
+      this.firing = timer;
+      try {
+        timer.callback();
+      } finally {
+        if (timer.interval !== undefined && this.firing === timer) this.insert({ ...timer, distance: timer.interval });
+        this.firing = undefined;
+      }
     }
   }
 
@@ -334,12 +341,7 @@ class Runtime {
       if (signal !== null && signal !== undefined) {
         const onAbort = () => this.abort(pending, signal.reason);
         signal.addEventListener('abort', onAbort, { once: true });
-        const guard = this.guards.get(signal);
-        if (guard !== undefined) guard.uses++;
-        pending.cleanup = () => {
-          signal.removeEventListener('abort', onAbort);
-          if (guard !== undefined && --guard.uses === 0) this.clearId(guard.timer);
-        };
+        pending.cleanup = () => signal.removeEventListener('abort', onAbort);
       }
     });
   }
@@ -360,9 +362,9 @@ class Runtime {
     this.timers.splice(i, 0, timer);
   }
 
-  private add(callback: () => void, distance: number, interval: number | undefined): Timer {
+  private add(callback: () => void, distance: number, interval: number | undefined, unref: boolean): Timer {
     const id = this.nextTimer++;
-    this.insert({ id, callback, distance, interval });
+    this.insert({ id, callback, distance, interval, unref });
     return id as unknown as Timer;
   }
 
@@ -371,6 +373,7 @@ class Runtime {
   }
 
   private clearId(id: number): void {
+    if (this.firing?.id === id) this.firing = undefined;
     const i = this.timers.findIndex((pending) => pending.id === id);
     if (i >= 0) this.timers.splice(i, 1);
   }
@@ -383,11 +386,14 @@ class Runtime {
       const pending = live.get(timer.id);
       if (pending === undefined) return `it did not set timer ${timer.id}, which the value has`;
       if (pending.interval !== timer.interval) return `it set timer ${timer.id} with another period than the value has`;
+      if (pending.unref !== (timer.unref === true)) return `it set timer ${timer.id} ${pending.unref ? 'for a timeout signal' : 'as a timer'}, where the value has it ${pending.unref ? 'as a timer' : 'for a timeout signal'}`;
       live.delete(timer.id);
       next.push({ ...pending, distance: timer.distance });
     }
     for (const timer of live.values()) return `it set timer ${timer.id}, which the value does not have`;
-    this.timers = next.sort((a, b) => a.distance - b.distance || a.id - b.id);
+    // In the value's order, which is due order: the order the timers were
+    // set in is not, after an advance past several or an interval re-armed.
+    this.timers = next;
     return undefined;
   }
 
@@ -395,7 +401,12 @@ class Runtime {
     this.step = undefined;
     if (this.fault !== undefined) throw this.fault;
     const timers = ValueList.from(
-      this.timers.map((timer): TimerValue => (timer.interval === undefined ? { id: timer.id, distance: timer.distance } : { id: timer.id, distance: timer.distance, interval: timer.interval })),
+      this.timers.map((timer): TimerValue => {
+        const value: TimerValue = { id: timer.id, distance: timer.distance };
+        if (timer.interval !== undefined) value.interval = timer.interval;
+        if (timer.unref) value.unref = true;
+        return value;
+      }),
     );
     return this.result === undefined ? { started: this.started, log: this.log, timers } : { started: this.started, log: this.log, timers, result: this.result };
   }
@@ -405,6 +416,16 @@ const runtimeOf = (runtime: ProgramRuntime): Runtime => runtime as unknown as Ru
 
 function isToProgram(message: unknown): message is ToProgram {
   return typeof message === 'object' && message !== null && 'pos' in message && ('response' in message || 'error' in message);
+}
+
+/** How many requests of the log are unsettled: sent, and neither answered, failed nor aborted. */
+function inFlight(log: ValueList<LogEntry>): number {
+  let count = 0;
+  for (const entry of log.toArray()) {
+    if ('sent' in entry) count++;
+    else if (!('fired' in entry)) count--;
+  }
+  return count;
 }
 
 /** How a program's value reads: what it is doing, and its timers. */
@@ -439,12 +460,16 @@ export function program(main: (host: Host) => unknown, options: ProgramOptions =
 
     events(value) {
       if (!value.started) return [{ event: 'start', expected: true }];
-      if (value.timers.length === 0) return [];
-      const head = value.timers.get(0);
-      if (head.distance === 0) return [{ event: { fire: head.id }, expected: true }];
+      const timers = value.timers.toArray();
+      // A due timer is expected to fire; time moving first is its callback running late.
+      const due = timers[0]?.distance === 0;
+      // Time moves to an unreferenced timer only while something else holds
+      // the part: a timer due, or a request in flight, which may take that long.
+      const waiting = due || inFlight(value.log) > 0;
       const distances = new Set<number>();
-      for (const timer of value.timers.toArray()) distances.add(timer.distance);
-      return [...distances].map((distance) => ({ event: { advance: distance } }));
+      for (const timer of timers) if (timer.distance > 0 && (waiting || !timer.unref)) distances.add(timer.distance);
+      const advances = [...distances].map((distance) => ({ event: { advance: distance } }));
+      return due ? [{ event: { fire: timers[0]!.id }, expected: true }, ...advances] : advances;
     },
 
     async restore(id, value) {

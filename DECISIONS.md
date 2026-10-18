@@ -968,8 +968,15 @@ and not the kind's so that the system knows when it resumed, which is
 when the rebuild check has anything to compare; and so that a kind is
 simpler to write. A step that throws forgets the live runtimes it
 touched: one changed before the failure is at no value, and resumed it
-gave a bogus rebuild-check failure, which the review of 0.3 found. Two replays at once would interleave their microtasks,
-and a divergence would show nondeterministically. **Rejected** (held for a
+gave a bogus rebuild-check failure, which the review of 0.3 found. Two
+replays at once would interleave their microtasks, and a divergence would
+show nondeterministically. A step takes a runtime it resumes out of the
+live cache until its snapshot, so that a step of another search of the
+same system, at the same value, rebuilds its own: shared, two searches at
+once changed one runtime, which gave a false proof without the rebuild
+check and a bogus failure with it, as the review of 0.3.0 found. A
+harness error is still the model's: whichever search meets it, every
+search of the system meets it after. **Rejected** (held for a
 day, 2026-10-18): a typed call on a peer's runtime, reached by id through
 the step, with the step restoring the peer on the way. The sender would
 have had to declare what it reaches so the system could restore that
@@ -1022,20 +1029,25 @@ asks about states the live runtime is not at; cheap at the sizes tried
 (a few hundred states in tens of milliseconds), and the remedy is under
 Open.
 
-### D42. Time is local, relative and never read; a timeout signal's timer goes with its request
+### D42. Time is local, relative and never read; a timeout signal's timer is unreferenced
 
 Each program part keeps its timers as distances to fire, each with an id,
-in due order and registration order at equal dues (the HTML rule); an
-advance subtracts and what reaches zero is due. The part expects to fire
-the head of its due queue; its other events are one advance per distinct
-distance among its timers, never expected, so time proceeds only when
-nothing else can happen, and one advance past several wake-ups is one
-event and one deviation. The log records which timer fired, never an
-advance: a restore matches the timers the code set to the value's by id
-and gives them the value's distances. The clock is never read. `random`
-and `uuid` are a seeded stream, from the seed and the part's id, the same
-on replay. A `timeoutSignal`'s timer is dropped once every request it
-guarded has settled.
+in due order and, at equal dues, the order they were set or re-armed in
+(the HTML rule); an advance subtracts and what reaches zero is due. An
+interval is re-armed once its callback has run, unless the callback
+cleared it. The part expects to fire the head of its due queue; its other
+events are one advance per distinct distance among its timers, never
+expected, so time proceeds only when nothing else can happen, and one
+advance past several wake-ups is one event and one deviation. The
+advances are offered while a timer is due too: time moving first is its
+callback running late. The log records which timer fired, never an
+advance: a restore matches the timers the code set to the value's by id,
+gives them the value's distances, and keeps the value's order. The clock
+is never read. `random` and `uuid` are a seeded stream, from the seed and
+the part's id, the same on replay. A `timeoutSignal`'s timer is
+unreferenced, as the platform's is: it counts down and fires when time
+reaches it, but time moves to it only while something else holds the
+part, a request in flight, whichever signal it carries, or a timer due.
 
 **Why.** No absolute time in the state, so a value part whose tick
 changes nothing returns to the same state, the space of a periodic value
@@ -1049,11 +1061,25 @@ world, so one advance past several wake-ups is one deviation where
 advancing one at a time is as many; the states the two ways reach merge,
 which is why an advance is not logged — logged, it was in the history, and
 the review of 0.3 found the two ways apart. `AbortSignal.timeout`'s timer
-is one the platform does not wait for, and once every request on it has
-settled it could only abort a signal nobody listens to; kept, it padded
-every trace with timers firing to nobody; dropped at the first request's
-settling, it cut short a deadline shared by a batch, which the review
-found. Two parts with one seed drew the same idempotency key, which the
+is one the platform does not wait for, but whose time passes while it
+waits for anything else; kept as an ordinary timer, it padded every trace
+with timers firing to nobody; dropped at the first request's settling, it
+cut short a deadline shared by a batch, which the review found; dropped
+once every request on it had settled, as 0.3.0 had it, a deadline the
+code shares between requests one after another, or over a retry loop,
+could never fire on the later ones, and a search proved a timeout path
+safe that it never explored, which the review of 0.3.0 found. Tracking
+which requests carry the signal does not do: one passed in a `Request`
+or through `AbortSignal.any` is another signal, and a deadline passes as
+well during a request it does not guard. Kept, it costs a logged fire
+wherever time passes a deadline nobody is waiting on: the retry example
+went from 1090 states to 1409. The platforms re-arm an
+interval after its callback (Node's `listOnTimeout`, HTML's timer
+initialization steps); re-armed before, as 0.3.0 had it, a timer the
+callback set for the period fired after the next tick, an order no
+platform produces. Kept by distance and then id, as 0.3.0 restored them,
+the order broke after an advance past several wake-ups, and a restore
+of a correct program was a `SystemError`. Two parts with one seed drew the same idempotency key, which the
 review found too; the id is mixed in.
 **Rejected:** absolute time in the state, which grows without bound and
 makes every tick a new state. **Rejected:** orderings alone, with no
@@ -1062,8 +1088,10 @@ their distances, or the model explores schedules no runtime produces
 (Alur and Dill's regions are the general form; relative integers are the
 practical stopping point). **Rejected:** a nominal latency per delivery, a
 made-up number with which the baseline needed an "early" beside its
-"late"; and processing that takes time, since any step may be arbitrarily
-late already. **Rejected:** logging the random draws, which a seeded
+"late"; and processing that takes time, since a step may be arbitrarily
+late already: one that is not due by time moving between steps, and one
+that is due by time moving before it, which 0.3.0 did not offer and the
+review of 0.3.0 found. **Rejected:** logging the random draws, which a seeded
 stream makes a function of the history. **Deferred:** one aligned clock
 advancing every part together, clock reads, and the turn; see Open.
 **Cost.** A timer's id is a counter, so two histories that set different
