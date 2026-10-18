@@ -63,7 +63,9 @@ of theirs is visible from inside.
 One: `stifinder`. It ships as ES modules with declarations, for Node 22 or
 newer. Members marked `@internal` are left out of the published
 declarations (`stripInternal`), so the types a consumer sees are the API
-(D22).
+(D22). Beside it, `stifinder/host` is the `Host` interface and `webHost()`
+and nothing else, with no import: production code that takes a host
+carries none of the search (D45).
 
 ---
 
@@ -491,7 +493,7 @@ from.
   an async function so that a throw takes the same tick as a return.
   Nothing the body hands to the macrotask queue is part of the run, or of
   the model: a timer is not set by a body but modelled, as a decision of a
-  double (and through a host, in the proposal under Open in DECISIONS.md).
+  double, or through the host of a program part (§9.4).
   A decision made from such work, once the run is over, is thrown to that
   work, and remembered by the model, which throws it at the next state a
   search asks about. That is the next search's: a search is one chain of
@@ -513,6 +515,156 @@ the model's `maxDecisions` given the model (which has `body` and
 body does not offer, or more decisions than it makes, is a
 `DecisionsError`. Why: D36, D37.
 
+### 9.4 Systems of parts
+
+`system(parts, options?)` makes a `Model<SystemState, SystemEvent>` of
+parts composed over a simulated network: real code behind a host, a mock
+server, the network between them, or parts of the caller's own. Why: D38
+to D45.
+
+- **A part is a `Kind`**, one interface for every part of it:
+  `initial(id)`, the value a part starts from; `events(value)`, what it can
+  do next, each an `Offer` with the event, whether the part *expects* it,
+  and its cost keys; `restore(id, value)`, a runtime rebuilt from the value
+  alone; `ingest(runtime, event, step)`; `receive(runtime, from, message,
+  step)`; `snapshot(runtime)`, the value back; and the describers. A part's
+  state is split into a *value* for the cache, which must be a valsem
+  value, and a *runtime* for the code, which is the kind's own. `events` is
+  a function of the value alone, never of a runtime, so that a system of a
+  thousand parts asks a state for its events without restoring one. A
+  value is a state the platform itself restarts from and every input
+  since: `initial` and the whole history for a value part or a client,
+  storage and alarm and the inputs since it came into memory for a Durable
+  Object (deferred). `valuePart(kind)` is a kind whose runtime is a `Cell`
+  holding the value: a reducer.
+- **A state is every part's value by id**, a `ValueMap`, and the *active*
+  set, the ids whose value has any event. It is opaque (`SystemState`);
+  `partsOf` gives the values. The parts a test names are there from the
+  start, in the order named; a part `kindOf` knows comes to exist when a
+  message first reaches its id, with `initial(id)`, and no part is removed.
+  Ids are strings, so part order is the order named and then id order,
+  which no history disturbs. Merging is valsem equality on the product.
+- **An event is one part's event**, `{ part, event }`. `getEvents` walks
+  the active parts in part order and lists the *candidates* first: the
+  offers the parts expect, or where none is expected each active part's
+  first offer; index 0 is free and the rest are deviations; then every
+  other offer. Cost keys pass through.
+- **A step** restores the owner, runs its `ingest`, drains the microtask
+  queue (a yield to the macrotask queue, with the real `setImmediate` as it
+  was when stifinder loaded), then delivers what was sent: each message
+  into its receiver's `receive`, the receiver restored first and a drain
+  after, until nothing is left. The parts restored are the *touched* set;
+  their snapshots are interned and replace their values, the active set is
+  updated from them, and every other value is kept. **Parts talk by
+  message**, `step.send(to, message)`, never by a reference to another's
+  runtime, so a runtime holds nothing but ids, a replay has no step to
+  send through, and the system sees every message. Restores are
+  sequential, in the order sent: two replays at once would interleave
+  their microtasks.
+- **The live runtime** of each part after its last step is kept by the
+  system with the value it is at, and resumed when a later step finds the
+  part at that value; otherwise the kind rebuilds one. A step that throws
+  forgets the live runtimes it touched, since one it changed before failing
+  is at no value. When a step resumed anything and `rebuildCheck` is on
+  (the default), the step is run again with every part rebuilt from the
+  pre-state values, and the two are compared: a difference in a snapshot
+  or in the messages sent means state lived outside a value, and is a
+  `SystemError`. `ingest` and `receive` are synchronous: one that returns a
+  promise is a `SystemError`, since the step would move on without it.
+- **A `SystemError` is the test's error**, never the system's failure, as
+  a `DecisionsError` is: a message to a part that does not exist, code that
+  departs from its log on replay, a host call outside a step, a rebuilt
+  part that differs, a value a kind gives that valsem cannot hold, `events`
+  that throw. A kind throws it, or the step finds it, or a kind recorded it
+  between steps and answers it from `fault()`, which the system asks of
+  every kind before each step; `applyEvent` then leads to one poison
+  state, whose `getEvents` throws the error, so the search rejects (§5),
+  and every later call on the model meets it. Any other throw from
+  `ingest` or `receive` is the system's failure, and a violation.
+- **`invariant` and `ends`** are the model's `invariant` and
+  `terminalInvariant` over the parts' values by id, typed from the kinds
+  named. A throw is the violation, and so is `{ error }` returned; any
+  other value returned is nothing, so that an arrow returning an
+  assertion chain is not read as a verdict (such a chain may be a proxy
+  that throws on any property read; only a plain object is looked at).
+- **A program part** (`program(main, options?)`) is real code behind a
+  `Host`. Its value is `{ started, log, timers, result }`: the log of what
+  the host delivered and took, in order, as a `ValueList` of entries —
+  `sent` and `aborted` are outputs, `got`, `failed` and `fired` inputs;
+  its pending timers, each with an id, a distance to fire and a period if
+  it repeats, in the order they fire; and what `main` settled with, a
+  `Response` by its status, nothing as `null`, a throw by its message.
+  `restore` of a started value runs `main` again with the log replayed:
+  an input entry is fed to the code and the queue drained, an output
+  entry must be what the code does next, compared by value; then the
+  timers the code set are matched to the value's by id and given its
+  distances, which is how an advance, which is not logged, is replayed. A
+  difference is recorded by the host and raised by `restore` once the
+  drain is over, as a `SystemError`; it is not thrown into the code,
+  which may catch it. The rebuilt snapshot must equal the value. The
+  system resumes the live runtime where the value matches. `fetch` turns
+  the request into a value (a string body or none), logs it, sends `{
+  fetch, pos }` to the part `options.network` names (`'net'`), and returns
+  a promise the network settles by position: `{ pos, response }` resolves
+  it with a `Response` rebuilt from the value, `{ pos, error }` rejects it
+  with a `TypeError`; an answer no `Response` can be, a status outside 200
+  to 599 or a body on a status that has none, is the server part's error.
+  A signal aborts it: the request is removed, `aborted` logged, `{ abort:
+  pos }` sent. A request the model cannot carry — a body that is not a
+  string — is recorded and raised when the step is snapshotted, and the
+  code waits on a promise that never settles, as it does after a host
+  call outside a step; neither is thrown into the code, which may catch
+  it, nor out of whatever called the host. A `GET` with a body is the
+  code's error, rejected as the platform rejects it. The part's events are
+  `start` when not started; `{ fire: id }`, expected, when the head timer
+  is due; else `{ advance: δ }` for each distinct distance among its
+  timers, never expected. An advance subtracts, and is not logged, so
+  histories that differ only in how time moved are one state; a timer
+  that reaches zero is due. Timers are kept by distance and then id,
+  which is due order and registration order at equal dues (the HTML
+  rule); an interval comes back at its period when it fires;
+  `timeoutSignal` is a timer that aborts a signal, dropped once every
+  request it guarded has settled, as the platform's unreferenced timer
+  would be (a signal of the code's own is never dropped). `random` and
+  `uuid` are a seeded stream, from `options.seed` and the part's id, the
+  same on replay, so no draw is logged. A host call outside a step, from
+  a real timer above all, is recorded on the kind and answered from
+  `fault()`, so the system raises it at its next step, whichever part's;
+  work the code hands to the platform finishes outside the step, and a
+  call from it that lands inside the step's own yield passes as the
+  code's, which the model cannot tell apart.
+- **The network** (`http(routes)`) is a value part: every message in
+  flight, oldest first, as request legs and answer legs, and per server
+  the requests in progress there in delivery order. `routes` maps a URL to
+  a server id: the longest route the URL is under, the route itself or it
+  and a `/`, `?` or `#` after. A request is named by its *position* among its
+  client's outstanding requests, never by an id: the client sends it with
+  the position, the network keeps it on the leg and on the in-progress
+  entry, and when a request settles — its answer or failure delivered,
+  or the client gave up on it — every position of that client above it
+  moves down, in the same step. It expects to deliver the oldest message;
+  the other deliveries are reorderings; its faults are `lose` (`loss`), the
+  message is gone and nobody is told, and `fail` (`failure`), the client's
+  fetch rejects at once, before delivery with the server never having seen
+  the request and after it with the server having answered. A request the
+  client gave up on is an orphan: its leg stays in flight with no
+  position, is delivered like any other and cannot fail (nobody would
+  hear); in progress it is marked, and its answer goes nowhere; an answer
+  in flight to it is dropped. A server with nothing in progress is absent
+  from the record, so that equal states merge.
+- **A mock** (`mock(state, handle)`) is a value part: a reducer's state and
+  the requests delivered and not yet answered, in delivery order, with who
+  to answer. Its events are the outcomes `handle(state, request)` returns
+  for the oldest pending request, the first expected, each with a label and
+  cost keys; taking one leaves the outcome's state and sends `{ respond }`
+  to the sender. The alternatives are the mock's own events and not the
+  delivery's, since the delivery is the network's event and the network's
+  `events` reads only its value; so a request costs a step to deliver and a
+  step to answer.
+- **The report** names an event by the kind's `describeEvent(event, value,
+  id)` and a state by every part's `describeValue`, in part order, or shows
+  the values as they are.
+
 ---
 
 ## 10. Verification
@@ -527,6 +679,17 @@ violation is a proof. It checks them after random histories of calls on
 one cache: budgets up and down, runs cut short, callbacks that throw.
 `FUZZ_RUNS` and `FUZZ_SEED` run more models, or others.
 
+`src/system.test.ts` checks `system` against a second oracle: random
+systems of value parts against the product written straight from the
+rules, with no restoring, mail, active set or touched set, a state being
+every part's state and a message given to its receiver on the spot. It
+compares the states reached with their cost frontiers, the result flags,
+and the violation. `src/parts.test.ts` checks the program part against a
+third: a retrying client written as a value part reaches the same states
+and finds the same violation as the same client written as real code
+behind the host, up to the log, which keeps apart arrivals the value part
+merges and so is not compared on exhaustiveness.
+
 The other suites, beside the modules they test, pin each documented
 behaviour by name, and the regressions. The examples have tests, because
 the README quotes their output. CI also runs the suite against the oldest
@@ -539,13 +702,18 @@ types.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/index.ts` | the one entry point: it exports the three modules below |
+| `src/index.ts` | the one entry point: it exports the modules below |
 | `src/search.ts` | the model, cost helpers, `StateSpaceCache`, `explore`, `analyzeCache`, `exploreIteratively`, `exploreOnce`, `shortestViolation` |
 | `src/report.ts` | `formatViolation`, `ViolationError`, `IncompleteError` |
 | `src/check.ts` | `check` |
 | `src/decisions.ts` | `Decisions`, `decisionModel`, `decisionsOf`, `runOnce`, `DecisionsError` |
+| `src/system.ts` | `Kind`, `Step`, `Offer`, `valuePart`, `system`, `partsOf`, `SystemError` |
+| `src/program.ts` | `program`: real code behind the host, its log and replay |
+| `src/parts.ts` | `http` and `mock` |
+| `src/host.ts` | `Host`, `Timer`, `webHost`; published as `stifinder/host` |
 | `src/index.test.ts` | behaviour and regressions of the search |
 | `src/report.test.ts`, `src/check.test.ts`, `src/decisions.test.ts` | the report, the verdict, and code that decides |
+| `src/system.test.ts`, `src/program.test.ts`, `src/parts.test.ts` | systems of parts, with the second and third oracles (§10) |
 | `src/oracle.test.ts` | the brute-force oracle (§10) |
 | `examples/` | runnable models, imported as `stifinder`, which the test config maps to `src/` |
 | `scripts/check-commit-message.mjs` | the release-notes check CONTRIBUTING describes |
