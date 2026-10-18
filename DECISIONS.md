@@ -883,7 +883,9 @@ tied violations is reported (D11).
 
 ## Open
 
-**Decided, not built.** The recorder argument (D29).
+**Decided, not built.** The recorder argument (D29), for hand-written
+models and value parts; a program part's host records for it (the
+proposal).
 
 **Proposed, not decided.** The surface sketched in the discussion of D27;
 every name is provisional.
@@ -892,21 +894,34 @@ every name is provisional.
   says whether the path reproduced, and a report that shows its notes.
 - `findPath(cache, where)`: the shortest path to a state that satisfies a
   predicate, for "no state where" and for "some state where". From the
-  cache, which holds every arrival with its predecessor (D31).
+  cache, which holds every arrival with its predecessor (D31). The
+  proposal's `reachable` is its first use.
 - A scheduler over `Decisions` for bodies with several tasks, which picks
   the task to run next and settles between picks. The two that exist have
-  no user but a self-test (D27).
+  no user but a self-test (D27). Subsumed by the proposal's parts, except
+  for a body whose doubles decide synchronously, which the first delivery
+  leaves on `decisionModel` (see Deferred there).
 - `decide.note(text)` on `Decisions`, the body's way to the recorder
   (D29), shown by the report of a failing run.
 - Merging the states of a body by a fingerprint of the world at a decision,
   where a body can give one, so that a state reached by two decision
   sequences is explored once (D36). Nothing needs it at kilde's sizes.
-- `settle()`: resolves once the microtask queue has drained.
+  Superseded by the proposal's checkpoints, which fold a part only where
+  the system itself restarts from the folded value.
+- `settle()`: resolves once the microtask queue has drained. Subsumed by the
+  proposal: a step of a system ends when the microtask queue is empty,
+  which the simulator waits for, and a body under `decisionModel` is
+  complete on the microtask queue by rule (D37).
 - An `optional` mark on an event, so that `terminalInvariant` also runs
   where every event is optional, if a fault offered alone should be
   supported (D7).
 - A deviation charge the model sets per event: the index, for delay
-  bounding without the encoding; zero, for a model with no baseline (D3).
+  bounding without the encoding; zero, for a model with no baseline (D3);
+  and a key of its own for a reordering — another expected event taken
+  first — which the proposal's expected events make concrete: with one key,
+  a budget can say "any schedule, no faults" (the fault keys at 0) but not
+  "faults on the plain schedule alone", and whether a bug needs the
+  reordering or only the fault is a real question.
 - A deepening policy over steps and deviations together, and a result that
   reports the violations that trade one for the other (D33, D10).
 - A composition of parts over a simulated network, with a host for the
@@ -947,56 +962,88 @@ sees every part through one interface. `restore(value, registry)` gives a
 runtime for a value: the cached runtime if its value matches, else one
 rebuilt. `snapshot(runtime)` gives the value back. `events(runtime)` lists
 what the part can do next, each a value with a label, cost keys, and
-whether it is the part's default. `ingest(runtime, event)` does one of
-them. `describeEvent` and `describeState` are as for a `Model`. A part is a
+whether the part *expects* it — the sunny-day event, of which a part may
+name none or several. `ingest(runtime, event)` does one of them.
+`describeEvent` and `describeState` are as for a `Model`. A part is a
 `Model` with its state split into a value for the cache and a runtime for
 the code.
 
 **A system** of parts is a `Model`. Its state is the parts' snapshots. Its
-`getEvents` is every part's default in part order, then every other event
-in part order and the part's own order. Its `applyEvent` restores parts
-lazily through the registry, calls `ingest` on the event's owner, waits
-for the microtask queue to drain, and snapshots every part. The search
-core is unchanged, and merging is valsem equality on the product.
+`getEvents` begins with the *candidates*: the events the parts expect, in
+part order and each part's own order; where no part expects anything, each
+part's first event. One candidate is free, at index 0 — the first, or with
+a `seed` the one the hash of the state picks (below) — then the other
+candidates, then every other event in part order and the part's own order.
+Its `applyEvent` restores parts lazily through the registry, calls `ingest`
+on the event's owner, waits for the microtask queue to drain, and snapshots
+every part. The search core is unchanged, and merging is valsem equality
+on the product.
 
 The simulator knows four things, none about time and none about what parts
 say to each other: a step ends when the microtask queue is empty;
 `restore` touches nothing but its own part; events are values naming
-things in a snapshot; defaults come first, in part order.
+things in a snapshot; the candidates come first, the free one before the
+others, and part order breaks the ties that remain. Within a part, order is
+physics — a host's due queue runs in the HTML order, a stub's messages are
+FIFO, a network of equal latencies delivers oldest first — and a part lists
+its events in that order; across parts, order is a choice, and the
+candidates are exactly where it is made.
 
 **Three kinds of part** in the first delivery:
 
 - `program(main)`: real code behind a *host*, the adapter it takes its
   platform from: `fetch`, `setTimeout`, `clearTimeout`, `setInterval`,
-  `clearInterval`, `timeoutSignal`. Its value is the log of inputs the host
-  delivered (responses, errors, timer firings) as a `ValueList`, its
+  `clearInterval`, `timeoutSignal`, and `random` with a `uuid` on it. Its
+  value is the log of inputs the host delivered (responses, errors, timer
+  firings, the random draws) as a `ValueList`, its
   pending timers as distances to fire, and its queue of due macrotasks.
   `restore` resumes the live runtime when its log matches, else runs `main`
   again with the log replayed: inputs fed back, outputs suppressed and
   compared with the recording, a difference being the test's error, as a
-  body whose decisions change is today (D37). Its default event is the
-  head of its due queue; its other events are `advance(δ)`, one per
-  distinct distance among its pending timers: its own clock, local and
-  relative, folded into the host.
+  body whose decisions change is today (D37). It expects the head of its
+  due queue; its other events are `advance(δ)`, one per distinct distance
+  among its pending timers — its own clock, local and relative, folded into
+  the host — and never expected, since time proceeds only when nothing else
+  can happen. One `advance` past several wake-ups is one event, and so one
+  deviation, where advancing one wake-up at a time is as many: a long stall
+  is one fault in the world. The states the two ways reach merge.
 - `mock(reducer)`: a value part. `handle(state, request)` returns one
   outcome, or several alternatives each with a label and cost keys, the
   first expected.
 - `http(routes)`: a value part standing for the network. Its value is the
   messages in flight, request legs and response legs, as serialised values
-  with ids from per-part counters, and the orphans of aborted requests. Its
-  default is to deliver the oldest message in flight. Its other events are
+  with ids from per-part counters, and the orphans of aborted requests. It
+  expects the delivery of the oldest message in flight. Its other events are
   the other deliveries, a lost request or response, and an orphan still
   reaching the server; a request delivered to a mock with alternatives is
   one delivery event per alternative. Delivering runs the receiver inside
   the step: the reducer for a request, the host's resolution for a
   response.
 
-**The expected schedule**, stated once: due macrotasks, in host order;
-then deliveries, oldest first; time proceeds, for the first host in part
-order that waits, only when nothing else can happen anywhere. Every other
-pick is one deviation plus its keys: a reordering within an instant, a
-delivery after a timer that was due, a stall past any number of wake-ups,
-a fault.
+**The expected schedule**, stated once. The candidates of a state are the
+heads of the hosts' due queues and the oldest delivery in flight; the free
+one is the first in part order, or the seed's pick. When nothing is due and
+nothing is in flight, no part expects anything, and the nearest `advance`
+of every waiting host is a candidate: time proceeds for one host, the first
+in part order or the seed's pick, and the others wait until nothing is due
+or in flight again, when every waiting host's advance is a candidate once
+more. Every other pick is one deviation plus its keys: a reordering —
+another candidate taken first — a delivery after a timer that was due, a
+stall past any number of wake-ups, a fault. A reordering and a fault are
+charged alike today; a key of their own for reorderings is under Open, and
+the report tells them apart whichever way that goes.
+
+**`seed`**, an option of the iterative search. Given one, the free
+candidate of a state is `deepHash(state, hasher) mod k` into the candidate
+list, with `hasher` a valsem hasher keyed by the seed
+(`createMarvin32Hasher`, valsem 0.2): the same pick in every process for
+the same seed, valsem version and model shape, and the hash incremental
+over the parts' shared structure (valsem D68). Without a seed the free
+candidate is the first, and a report reads as today. The report of a
+seeded search re-counts the found path's deviations against the plain
+order, so its number keeps its meaning though it is not the minimum;
+`exhaustive` is untouched, being a statement about the space, which no seed
+changes. Why a seeded mode, and what it needs of the cache, is under Why.
 
 **Rules the parts obey.** Exactly two synchronous calls cross a part
 boundary: a delivery into a part, and an output into the network.
@@ -1007,6 +1054,20 @@ part with a choice offers it as events. None of this can be enforced in
 JavaScript; the detector is to rebuild every part from its value at a
 sample of states, re-apply the step, and compare the product snapshot with
 the live one. A difference means state lived outside the snapshots.
+
+The drain that ends a step is a yield to the macrotask queue
+(`setImmediate`, taken with the real timer as it was when stifinder loaded,
+since a test that fakes timers fakes that one too). It is not the yield
+D37 refused. That one would have let a body's own timers fire so the
+search could catch what they decided — an accommodation of a body outside
+the model. This one defines where a step ends, for parts that have no
+timers of their own: their time is the host's, and nothing of theirs is on
+the macrotask queue to fire.
+
+For a program part the host sees every input it delivers and every output
+it takes, so its log is the trace: `explain` on a reported path is the
+replay with the log printed. D29's recorder argument stays for hand-written
+models and for value parts, whose `ingest` receives it.
 
 **Properties.** `invariant` and `terminalInvariant` over the product value,
 as today; a state is terminal when no part has an event, and a steady
@@ -1070,27 +1131,73 @@ nearest wake-up first. It gives the baseline the code's durations imply,
 at the price of a state per relative phase of the hosts' clocks, bounded
 by the lcm of the periods, and it undoes the collapse of a tick to a
 self-loop. With local clocks the price moves: when two parts both progress
-on periodic timers, the one later in part order costs a deviation per
-tick. It is paid in deviations, visibly, and only then; aligned clocks
-stay as the policy for that case. **Rejected:** a hash of the state to
-break ties among waits. It varies only where the state already varies,
-and it makes the expected schedule shift with every unrelated change to
-the code. Clock reads are left out of the first delivery entirely: a read
+on periodic timers, the one later in part order costs a deviation per tick
+under the seedless pick. The ladder from there: every waiting host's
+advance is a candidate, so a seed spreads the tax across the states a run
+passes through; a seed cannot alternate in a fixpoint, since the hash of a
+state that a round returns to picks the same host every round, and that is
+the periodic case; the *turn* — the host whose wait is advanced next, kept
+in the system's state and rotating among the hosts that wait, nothing while
+one host is active and ×N states at most — gives alternation there,
+deterministic and readable, at 1:1; aligned advance gives the real ratio
+between periods at the deferred price of a state per phase, and stays as
+the policy for the case the turn cannot serve. The two-client counter is
+the validation that says how far up the ladder the first delivery must
+go. **Rejected as the baseline:** a hash of the state to break ties among
+waits. It varies only where the state already varies, so in a fixpoint it
+is pinned, exactly where fairness is wanted; and it makes the expected
+schedule shift with every unrelated change to the code, and with the hash
+seed of the process, so the uncharged steps of a report are ones no reader
+can fill in. **Adopted as a mode:** the same hash under a key the test
+supplies, `seed`, with a deterministic hasher — see the next paragraph.
+Clock reads are left out of the first delivery entirely: a read
 puts an absolute number into the reader's log, and an abstract `Instant`
 that avoids the number must know which instants the code still holds,
 which a program part cannot know without checkpoints or declared
 constants.
 
+**Seeds, for the space that cannot be exhausted.** The state space, the
+transitions and the merging are the same under every seed; a seed changes
+only which edge out of each state is free. So with deviations unbounded a
+seed reorders the finding and nothing else, and under a bounded budget it
+chooses the neighbourhood: *d* deviations around baseline *s*, and *k*
+seeds are *k* neighbourhoods — swarm verification (Holzmann). It finds a
+different kind of bug. Distance from the plain schedule and PCT's depth
+(how many ordering constraints a bug needs) are different measures: a bug
+of depth one can lie ten deviations from the plain baseline, if B has to
+progress nine ticks to reach it, and a random baseline satisfies one
+constraint with probability about a half while B's progress costs it
+nothing. The plain search finds what is near normal; the swarm finds what
+is shallow in constraints and far from normal. The plain baseline stays
+the default, since it is what makes a report readable, and a seeded search
+is for a space `exhaustive` is out of reach for: exhausted, every seed
+finds the same space. **What it needs.** The cache split in two: what the
+model said — the event sets, the `applyEvent` results, the invariants,
+which for a program part are the replays and so all the cost — is
+seed-free and shared; what a search labelled — the order of events, the
+cost vectors, the pending buckets — is per seed. Today both live in one
+`StateSpaceCache`, and this is the reason to separate them. For three
+parts or fewer, enumerating the part orders is a better swarm than random
+seeds: complete over the one dimension that matters, each run's baseline
+with a name. **Rejected:** hashing a projection of the state rather than
+the whole, for stability under unrelated changes; in a seeded mode the
+seed is arbitrary already, and whole-state variation is what gives
+alternation when the state changes.
+
 **Faults ride on carriers.** A lost response is an alternative to its
 delivery; a server-side 500 is an alternative of the request's delivery.
 A fault offered alone keeps a state from being an end (D7), and once
-nothing nominates a default, the first non-default is free whichever part
-it belongs to.
+nothing nominates an expected event, each part's first event is a
+candidate, whichever part it belongs to.
 
 **All decisions are steps.** A decision made inside a drain cannot wait for
 the search. Here every choice is an event of a part, so the harvest of D36
 is not needed; a synchronous `decide` inside a program part is deferred,
-with speculative execution of the expected step as the way to add it.
+with speculative execution of the expected step as the way to add it. That
+fixes who the first delivery is for: the Durable Object simulator, the
+remote counter and the outbox, whose choices are messages and timers.
+kilde's sinks and sources decide synchronously, through `integer`, and
+stay on `decisionModel` until that arrives.
 
 **Values at the boundary, replay isolated, and a rebuild check.** A live
 `Response` passed across would couple two runtimes; a replay that re-sent
@@ -1105,28 +1212,45 @@ the system got where it should, without declaring any state an end.
 #### Validation
 
 A differential oracle: systems of value parts only, against a hand-written
-product `Model`, fuzzed as `oracle.test.ts` does. `examples/remote-counter`
+product `Model`, fuzzed as `oracle.test.ts` does. A second, for `program()`:
+a value part wrapped as a program part — its reducer run behind a host,
+requests in and responses out — must explore the same product as the value
+part does, up to the log; that is what exercises replay, suppression and
+the rebuild check against a known answer, which the first oracle never
+reaches. `examples/remote-counter`
 redone with its real clients over `mock` and `http`, with the same three
 outcomes at the same costs. The transactional outbox: the real relay
 against its explicit model, the duplicate at one timeout and one retry,
-clean after the idempotency fix within the same budgets. Runs and time
-under breadth-first exploration before any change of exploration order: a
+clean after the idempotency fix within the same budgets. The two-client
+counter under the seedless pick, the seed, and the turn, for the deviation
+at which the lost update appears under each. Runs and time under
+breadth-first exploration before any change of exploration order: a
 program part is replayed whenever the search asks about a state its live
-runtime is not at, and breadth-first by steps asks around.
+runtime is not at, and breadth-first by steps asks around (the remedy is
+under Deferred).
 
 #### Delivery
 
-1. The `Host` interface and `webHost()` in a dependency-free subpath,
-   `stifinder/host`, for production code that takes its host as an
-   argument. This revises D30: stifinder is no longer a testing tool
-   throughout.
-2. `system()` with value parts only: the interface, the merge rule, the
-   snapshot-all step, the differential oracle.
-3. `program()`: the log, resume or replay, suppression and comparison, the
-   rebuild check.
+1. The `Host` interface and `webHost()`, for production code that takes its
+   host as an argument: `fetch`, the timers, `timeoutSignal`, and `random`
+   with a `uuid` on it, since a client that makes an idempotency key with
+   `crypto.randomUUID()` diverges on replay and the outbox example is about
+   that key; clock reads stay deferred, a key not being a time. Where it
+   lives is open: a dependency-free subpath, `stifinder/host`, which
+   revises D30 (stifinder is no longer a testing tool throughout) and puts
+   a testing library in production bundles' dependency lists, or a separate
+   small package. Its shape — timer ids as values, requests and responses
+   as values — is dictated by `program()`, so it is delivered with step 3,
+   not before it.
+2. `system()` with value parts only: the interface, the candidates and the
+   free one, the merge rule, the snapshot-all step, the differential oracle.
+3. `program()` and the host: the log, resume or replay, suppression and
+   comparison, the rebuild check, the second oracle.
 4. `http()` faults and abort; `mock` alternatives.
-5. `reachable()`.
-6. Examples, a README section, DESIGN.md §9.4, and decisions D38 onward
+5. `seed`, with the cache split and the re-counted report; the turn, if the
+   two-client counter says so.
+6. `reachable()`.
+7. Examples, a README section, DESIGN.md §9.4, and decisions D38 onward
    cut from this entry.
 
 #### Deferred, each with what would bring it in
@@ -1142,6 +1266,10 @@ runtime is not at, and breadth-first by steps asks around.
 - The `optional` mark above: faults that should not prevent an end.
 - Durable Object networks: stubs created at run time, FIFO per stub with
   one shared break; parts addressed by id and created on first delivery.
+- Exploration order within a deviation level: depth-first along the live
+  runtime, replaying only at branch points, the product's analogue of
+  D36's harvest. D23 leaves the order within a level free; what is reported
+  does not change.
 - Streaming bodies; real servers as program parts, which need no new
   machinery; symmetry reduction; a horizon; synchronous decisions in
-  program parts.
+  program parts, which is what brings kilde's sinks and sources over.
