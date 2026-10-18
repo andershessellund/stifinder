@@ -19,8 +19,8 @@ import { HashMap, ValueMap, intern } from 'valsem';
  * A cost vector is an interned `ValueMap<string, number>`: per-key unit
  * counts, missing keys meaning zero. Besides a model's own keys it counts
  * `__steps__`, one per event, and `__deviations__`. Two structurally-equal
- * vectors are reference-identical (`===`) and carry a precomputed
- * `[hashCode]`, making cache keying and equality cheap.
+ * vectors are reference-identical (`===`) and carry their hash, making
+ * cache keying and equality cheap.
  */
 export type CostVector = ValueMap<string, number>;
 
