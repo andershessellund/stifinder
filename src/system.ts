@@ -298,6 +298,9 @@ export function system<Parts extends Record<string, AnyKind>>(parts: Parts, opti
       const kept = resume ? live.get(id) : undefined;
       let runtime: unknown;
       if (kept !== undefined && kept.value === value) {
+        // Taken out while the step changes it, so that a step of another
+        // search at the same value rebuilds its own; put back at the snapshot.
+        live.delete(id);
         runtime = kept.runtime;
         resumed = true;
       } else {
@@ -314,23 +317,19 @@ export function system<Parts extends Record<string, AnyKind>>(parts: Parts, opti
       },
     });
 
-    try {
-      synchronous(part, 'ingest', kindAt(part).ingest(await restored(part), event, stepFor(part)));
+    // A step that fails leaves no runtime it changed in `live`: one it
+    // resumed was taken out, and one it rebuilt never went in.
+    synchronous(part, 'ingest', kindAt(part).ingest(await restored(part), event, stepFor(part)));
+    await _drain();
+    for (let next = mail.shift(); next !== undefined; next = mail.shift()) {
+      messages.push(next);
+      synchronous(next.to, 'receive', kindAt(next.to).receive(await restored(next.to), next.from, next.message, stepFor(next.to)));
       await _drain();
-      for (let next = mail.shift(); next !== undefined; next = mail.shift()) {
-        messages.push(next);
-        synchronous(next.to, 'receive', kindAt(next.to).receive(await restored(next.to), next.from, next.message, stepFor(next.to)));
-        await _drain();
-      }
-      const values = new Map<string, unknown>();
-      for (const [id, { kind, runtime }] of runtimes) values.set(id, canonical(id, kind.snapshot(runtime)));
-      if (resume) for (const [id, { runtime }] of runtimes) live.set(id, { runtime, value: values.get(id) });
-      return { values, messages, resumed };
-    } catch (error) {
-      // A runtime the step changed before it failed is no longer at any value: forget it.
-      if (resume) for (const id of runtimes.keys()) live.delete(id);
-      throw error;
     }
+    const values = new Map<string, unknown>();
+    for (const [id, { kind, runtime }] of runtimes) values.set(id, canonical(id, kind.snapshot(runtime)));
+    if (resume) for (const [id, { runtime }] of runtimes) live.set(id, { runtime, value: values.get(id) });
+    return { values, messages, resumed };
   }
 
   /** How a step with live runtimes differed from one rebuilt, or null. */

@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 import { describe, expect, it } from 'vitest';
 import { ValueList, deepEqual } from 'valsem';
-import { type Host, type LogEntry, type ProgramValue, type Step, SystemError, _drain as drain, program } from './index.js';
+import { type Host, type LogEntry, type ProgramValue, type Step, SystemError, type TimerValue, _drain as drain, program } from './index.js';
 
 /** A step that records what the part sends. */
 const recording = () => {
@@ -138,7 +138,7 @@ describe('program: timers', () => {
       { id: 3, distance: 50 },
       { id: 1, distance: 100 },
     ]);
-    expect(kind.events(value())).toEqual([{ event: { fire: 4 }, expected: true }]);
+    expect(kind.events(value())).toEqual([{ event: { fire: 4 }, expected: true }, { event: { advance: 50 } }, { event: { advance: 100 } }]);
     kind.ingest(runtime, { fire: 4 }, step);
     await drain();
     expect(fired).toEqual(['d']);
@@ -185,6 +185,75 @@ describe('program: timers', () => {
     expect(value().timers.toArray()).toEqual([]);
   });
 
+  it('an interval comes back once its callback has run, so a timer the callback sets for the period fires first', async () => {
+    const fired: string[] = [];
+    const { kind, runtime, step, value } = await started((host) => {
+      let n = 0;
+      host.setInterval(() => {
+        fired.push(`tick ${++n}`);
+        if (n === 1) host.setTimeout(() => fired.push('after'), 10);
+      }, 10);
+    });
+    kind.ingest(runtime, { advance: 10 }, step);
+    kind.ingest(runtime, { fire: 1 }, step);
+    await drain();
+    expect(value().timers.toArray()).toEqual([
+      { id: 2, distance: 10 },
+      { id: 1, distance: 10, interval: 10 },
+    ]);
+    kind.ingest(runtime, { advance: 10 }, step);
+    kind.ingest(runtime, { fire: 2 }, step);
+    kind.ingest(runtime, { fire: 1 }, step);
+    await drain();
+    expect(fired).toEqual(['tick 1', 'after', 'tick 2']);
+  });
+
+  it('an interval that clears another timer comes back; one whose callback throws comes back too, as on the platform', async () => {
+    const { kind, runtime, step, value } = await started((host) => {
+      const other = host.setTimeout(() => undefined, 50);
+      let n = 0;
+      host.setInterval(() => {
+        if (++n === 1) host.clearTimeout(other);
+        else throw new Error('tick');
+      }, 10);
+    });
+    kind.ingest(runtime, { advance: 10 }, step);
+    kind.ingest(runtime, { fire: 2 }, step);
+    expect(value().timers.toArray()).toEqual([{ id: 2, distance: 10, interval: 10 }]);
+    kind.ingest(runtime, { advance: 10 }, step);
+    expect(() => kind.ingest(runtime, { fire: 2 }, step)).toThrow('tick');
+    expect(value().timers.toArray()).toEqual([{ id: 2, distance: 10, interval: 10 }]);
+  });
+
+  it('while a timer is due, time may move first: its callback runs late, never expected', async () => {
+    const fired: string[] = [];
+    const { kind, runtime, step, value } = await started((host) => {
+      host.setTimeout(() => {
+        fired.push('a');
+        host.setTimeout(() => fired.push('c'), 3);
+      }, 0);
+      host.setTimeout(() => fired.push('b'), 5);
+    });
+    expect(kind.events(value())).toEqual([{ event: { fire: 1 }, expected: true }, { event: { advance: 5 } }]);
+    // On time, c fires before b; late by 5 ms, after it.
+    kind.ingest(runtime, { advance: 5 }, step);
+    expect(kind.events(value())).toEqual([{ event: { fire: 1 }, expected: true }]);
+    kind.ingest(runtime, { fire: 1 }, step);
+    kind.ingest(runtime, { fire: 2 }, step);
+    kind.ingest(runtime, { advance: 3 }, step);
+    kind.ingest(runtime, { fire: 3 }, step);
+    await drain();
+    expect(fired).toEqual(['a', 'b', 'c']);
+  });
+
+  it('a late callback may run past an unreferenced timer, which nothing else would move time to', async () => {
+    const { kind, value } = await started((host) => {
+      host.timeoutSignal(50);
+      host.setTimeout(() => undefined, 0);
+    });
+    expect(kind.events(value())).toEqual([{ event: { fire: 2 }, expected: true }, { event: { advance: 50 } }]);
+  });
+
   it('timeoutSignal aborts the fetch when its timer fires: the request is aborted, logged, and the network told', async () => {
     const { kind, runtime, step, sent, value } = await started((host) => host.fetch(url, { signal: host.timeoutSignal(100) }).catch((e: Error) => e.name));
     kind.ingest(runtime, { advance: 100 }, step);
@@ -198,18 +267,99 @@ describe('program: timers', () => {
     expect(value().result).toEqual({ value: 'TimeoutError' });
   });
 
-  it('an answer before the signal fires settles the request, and drops the signal\'s timer with it', async () => {
+  it('a timeout signal\'s timer is unreferenced: time moves to it while a request is in flight, and with nothing in flight not at all', async () => {
     const { kind, runtime, step, sent, value } = await started((host) => host.fetch(url, { signal: host.timeoutSignal(100) }).then((r) => r.status));
-    expect(value().timers.length).toBe(1);
+    expect(value().timers.toArray()).toEqual([{ id: 1, distance: 100, unref: true }]);
+    expect(kind.events(value())).toEqual([{ event: { advance: 100 } }]);
     kind.receive(runtime, 'net', { pos: 0, response: { status: 200 } }, step);
     await drain();
     expect(value().result).toEqual({ value: 200 });
-    expect(value().timers.length).toBe(0);
+    expect(value().timers.toArray()).toEqual([{ id: 1, distance: 100, unref: true }]);
     expect(sent).toHaveLength(1);
     expect(kind.events(value())).toEqual([]);
+    // Nor before any request: a signal nobody has passed to a fetch holds nothing up.
+    const fresh = await started((host) => new Promise((resolve) => host.timeoutSignal(100).addEventListener('abort', resolve)));
+    expect(fresh.kind.events(fresh.value())).toEqual([]);
   });
 
-  it('a signal of the code\'s own is not dropped: its timer fires, and aborts nobody', async () => {
+  it('a deadline passes during any request in flight, the signal\'s own or not, and whichever form the signal reaches fetch in', async () => {
+    for (const later of ['plain', 'request', 'any'] as const) {
+      const { kind, runtime, step, value } = await started(async (host) => {
+        const signal = host.timeoutSignal(100);
+        await host.fetch(`${url}/a`, { signal });
+        const b = later === 'plain' ? host.fetch(`${url}/b`) : later === 'request' ? host.fetch(new Request(`${url}/b`, { signal })) : host.fetch(`${url}/b`, { signal: AbortSignal.any([signal]) });
+        await b.catch(() => undefined);
+        return signal.aborted;
+      });
+      kind.receive(runtime, 'net', { pos: 0, response: { status: 200 } }, step);
+      await drain();
+      expect(kind.events(value())).toEqual([{ event: { advance: 100 } }]);
+      kind.ingest(runtime, { advance: 100 }, step);
+      kind.ingest(runtime, { fire: 1 }, step);
+      await drain();
+      if (later === 'plain') kind.receive(runtime, 'net', { pos: 0, response: { status: 200 } }, step);
+      await drain();
+      expect(value().result).toEqual({ value: true });
+    }
+  });
+
+  it('a timeout signal passed to a later fetch aborts it at the deadline it had all along', async () => {
+    const { kind, runtime, step, sent, value } = await started(async (host) => {
+      const signal = host.timeoutSignal(1000);
+      await host.fetch(`${url}/a`, { signal });
+      host.setTimeout(() => undefined, 300);
+      await new Promise<void>((resolve) => host.setTimeout(resolve, 200));
+      return host.fetch(`${url}/b`, { signal }).then(
+        (r) => r.status,
+        (e: Error) => e.name,
+      );
+    });
+    kind.receive(runtime, 'net', { pos: 0, response: { status: 200 } }, step);
+    await drain();
+    // With nothing in flight it moves no time, but counts down as time moves to the others.
+    expect(value().timers.toArray()).toEqual([
+      { id: 3, distance: 200 },
+      { id: 2, distance: 300 },
+      { id: 1, distance: 1000, unref: true },
+    ]);
+    expect(kind.events(value())).toEqual([{ event: { advance: 200 } }, { event: { advance: 300 } }]);
+    kind.ingest(runtime, { advance: 200 }, step);
+    kind.ingest(runtime, { fire: 3 }, step);
+    await drain();
+    expect(sent.at(-1)).toEqual({ to: 'net', message: { fetch: { method: 'GET', url: `${url}/b` }, pos: 0 } });
+    expect(value().timers.toArray()).toEqual([
+      { id: 2, distance: 100 },
+      { id: 1, distance: 800, unref: true },
+    ]);
+    expect(kind.events(value())).toEqual([{ event: { advance: 100 } }, { event: { advance: 800 } }]);
+    kind.ingest(runtime, { advance: 800 }, step);
+    kind.ingest(runtime, { fire: 2 }, step);
+    kind.ingest(runtime, { fire: 1 }, step);
+    await drain();
+    expect(sent.at(-1)).toEqual({ to: 'net', message: { abort: 0 } });
+    expect(value().result).toEqual({ value: 'TimeoutError' });
+  });
+
+  it('an unreferenced timer fires when time reaches it, and a signal it aborted fails a later fetch at once', async () => {
+    const { kind, runtime, step, sent, value } = await started(async (host) => {
+      const signal = host.timeoutSignal(100);
+      await host.fetch(`${url}/a`, { signal });
+      await new Promise<void>((resolve) => host.setTimeout(resolve, 500));
+      return host.fetch(`${url}/b`, { signal }).catch((e: Error) => e.name);
+    });
+    kind.receive(runtime, 'net', { pos: 0, response: { status: 200 } }, step);
+    await drain();
+    expect(kind.events(value())).toEqual([{ event: { advance: 500 } }]);
+    kind.ingest(runtime, { advance: 500 }, step);
+    expect(kind.events(value())).toEqual([{ event: { fire: 1 }, expected: true }]);
+    kind.ingest(runtime, { fire: 1 }, step);
+    kind.ingest(runtime, { fire: 2 }, step);
+    await drain();
+    expect(sent).toHaveLength(1);
+    expect(value().result).toEqual({ value: 'TimeoutError' });
+  });
+
+  it('a signal of the code\'s own is the code\'s: its timer is an ordinary one, which fires, and aborts nobody', async () => {
     const { kind, runtime, step, sent, value } = await started((host) => {
       const controller = new AbortController();
       host.setTimeout(() => controller.abort(), 100);
@@ -225,14 +375,15 @@ describe('program: timers', () => {
     expect(value().result).toEqual({ value: 200 });
   });
 
-  it('one timeout signal guarding several requests keeps its timer until the last of them settles', async () => {
+  it('one timeout signal guarding several requests can abort the last of them after the first has settled', async () => {
     const { kind, runtime, step, sent, value } = await started((host) => {
       const signal = host.timeoutSignal(1000);
       return Promise.all([host.fetch(`${url}/a`, { signal }), host.fetch(`${url}/b`, { signal })]).then(() => 'both', (e: Error) => e.name);
     });
     kind.receive(runtime, 'net', { pos: 0, response: { status: 200 } }, step);
     await drain();
-    expect(value().timers.length).toBe(1);
+    expect(value().timers.toArray()).toEqual([{ id: 1, distance: 1000, unref: true }]);
+    expect(kind.events(value())).toEqual([{ event: { advance: 1000 } }]);
     kind.ingest(runtime, { advance: 1000 }, step);
     kind.ingest(runtime, { fire: 1 }, step);
     await drain();
@@ -310,7 +461,50 @@ describe('program: replay', () => {
     expect(deepEqual(kind.snapshot(rebuilt), before)).toBe(true);
     const later = recording();
     kind.ingest(rebuilt, { advance: 10 }, later.step);
-    expect(kind.events(kind.snapshot(rebuilt))).toEqual([{ event: { fire: 3 }, expected: true }]);
+    expect(kind.events(kind.snapshot(rebuilt))).toEqual([{ event: { fire: 3 }, expected: true }, { event: { advance: 50 } }]);
+  });
+
+  it('restore keeps the value\'s order of timers, which is due order, not the order they were set in', async () => {
+    // After an advance past both: the one set second is due first.
+    const passed = await started((host) => {
+      host.setTimeout(() => undefined, 10);
+      host.setTimeout(() => undefined, 5);
+    });
+    passed.kind.ingest(passed.runtime, { advance: 10 }, passed.step);
+    const due = passed.value();
+    expect(due.timers.toArray()).toEqual([
+      { id: 2, distance: 0 },
+      { id: 1, distance: 0 },
+    ]);
+    expect(deepEqual(passed.kind.snapshot(await passed.kind.restore('client', due)), due)).toBe(true);
+    // An interval re-armed level with a timer set after it goes behind it.
+    const rearmed = await started((host) => {
+      host.setInterval(() => undefined, 10);
+      host.setTimeout(() => undefined, 20);
+    });
+    rearmed.kind.ingest(rearmed.runtime, { advance: 10 }, rearmed.step);
+    rearmed.kind.ingest(rearmed.runtime, { fire: 1 }, rearmed.step);
+    await drain();
+    const level = rearmed.value();
+    expect(level.timers.toArray()).toEqual([
+      { id: 2, distance: 10 },
+      { id: 1, distance: 10, interval: 10 },
+    ]);
+    expect(deepEqual(rearmed.kind.snapshot(await rearmed.kind.restore('client', level)), level)).toBe(true);
+  });
+
+  it('timers the code sets that the value does not have, or has otherwise, are a divergence on restore', async () => {
+    const { kind, value } = await started((host) => {
+      host.setInterval(() => undefined, 10);
+      return host.fetch(url, { signal: host.timeoutSignal(100) });
+    });
+    const at = value();
+    const timers = at.timers.toArray();
+    const restoring = (changed: readonly TimerValue[]) => kind.restore('client', { ...at, timers: ValueList.from(changed) });
+    await expect(restoring([...timers, { id: 9, distance: 5 }])).rejects.toThrow(/client diverged on replay: it did not set timer 9, which the value has/);
+    await expect(restoring(timers.slice(1))).rejects.toThrow(/it set timer 1, which the value does not have/);
+    await expect(restoring([{ id: 1, distance: 10 }, timers[1]!])).rejects.toThrow(/it set timer 1 with another period than the value has/);
+    await expect(restoring([timers[0]!, { id: 2, distance: 100 }])).rejects.toThrow(/it set timer 2 for a timeout signal, where the value has it as a timer/);
   });
 
   it('a value not started restores to a runtime not started', async () => {

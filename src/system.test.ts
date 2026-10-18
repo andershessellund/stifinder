@@ -264,6 +264,33 @@ describe('system: the rebuild check', () => {
   });
 });
 
+describe('system: one model, several searches', () => {
+  /** A part that spells its events: 'a' expected, 'b' a deviation, three at most. */
+  const word = () =>
+    valuePart<string, string>({
+      initial: () => '',
+      events: (w) => (w.length >= 3 ? [] : [{ event: 'a', expected: true }, { event: 'b' }]),
+      ingest(cell, event) {
+        cell.value += event;
+      },
+      receive() {},
+    });
+  const spelling = (rebuildCheck: boolean) =>
+    system({ p: word(), q: word() }, { rebuildCheck, invariant: ({ p, q }) => (p === 'bba' && q === 'aa' ? { error: 'p=bba q=aa' } : undefined) });
+
+  it('searches of one system at the same time share no live runtime: a step takes the one it resumes, and each search finds what it does alone', async () => {
+    for (const rebuildCheck of [false, true]) {
+      const model = spelling(rebuildCheck);
+      const outcomes = await Promise.allSettled([check(model, { maxDeviations: 10 }), check(model, { maxDeviations: 10 })]);
+      for (const outcome of outcomes) {
+        expect(outcome.status).toBe('rejected');
+        expect((outcome as PromiseRejectedResult).reason).toBeInstanceOf(ViolationError);
+        expect(((outcome as PromiseRejectedResult).reason as ViolationError).message).toMatch(/^p=bba q=aa/);
+      }
+    }
+  });
+});
+
 describe('system: the properties and the report', () => {
   it('ends and invariant see the parts\' values by id, and a throw is the violation', async () => {
     const model = system(

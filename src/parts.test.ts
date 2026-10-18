@@ -322,6 +322,27 @@ describe('real code over http and a mock', () => {
     expect(space.violation).toBeNull();
   });
 
+  it('one deadline over requests made one after another times out the later one too', async () => {
+    const model = system(
+      {
+        client: program(async ({ fetch, timeoutSignal }) => {
+          const signal = timeoutSignal(1000);
+          if (!(await fetch(`${base}/a`, { signal }).then(() => true, () => false))) return 'gave up';
+          return fetch(`${base}/b`, { signal }).then(
+            () => 'ok',
+            () => 'b timed out',
+          );
+        }),
+        net: http({ [base]: 'server' }),
+        server: mock(0, (state) => ({ state, response: { status: 200 } })),
+      },
+      { ends: ({ client }) => expect(client.result).not.toEqual({ value: 'b timed out' }) },
+    );
+    const error = await check(model, { baseBudget: { loss: 0, failure: 0 } }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ViolationError);
+    expect((error as ViolationError).message).toMatch(/in state: client: returned b timed out/);
+  });
+
   it('a request timed out by the host is aborted on the network, and the retry is a new request', async () => {
     const model = system(
       {

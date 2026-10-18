@@ -314,15 +314,18 @@ has nothing: the retry is not idempotent, which a budget of
 found on its own.
 
 **What a program part is.** Its state is the log of what the host delivered
-and took: the answers and failures of its requests, its timers firing, its
-clock moving, the requests it sent. The search explores by value, and runs
+and took: the answers and failures of its requests, its timers firing,
+the requests it sent. The search explores by value, and runs
 `main` again with the log replayed wherever it needs the code at a state it
 is not at. Two requirements follow, the same two as for a body that
 decides. The code must be a function of its inputs: one that draws
-`Math.random()`, reads the clock, or keeps state in a module between runs
-departs from its log on replay, and that is a **`SystemError`**, the test's
-error, never a violation; the host's `random()` and `uuid()` are a seeded
-stream, per part, for that reason. And a step is complete on the
+`Math.random()` or keeps state in a module between runs departs from its
+log on replay, and that is a **`SystemError`**, the test's error, never a
+violation; the host's `random()` and `uuid()` are a seeded stream, per
+part, for that reason. The host has no clock, and `Date.now()` sees none
+of the time the search moves: code that measures time with it is wrong
+in the model, and is caught at most where what it read changes what the
+code sends, sets or returns, on a replay after the clock has moved. And a step is complete on the
 microtask queue: work the code hands to the platform — a real timer, and
 also `crypto.subtle`, a compression stream, the file system — finishes
 after the step, outside the model, where the search cannot see it. A host
@@ -332,8 +335,12 @@ own yield passes as the code's, so the rule is the code's to keep, not the
 search's to enforce. A timer the code needs is the host's, which the
 search advances as an event. Time is local to each part and relative, so a
 wait reads `client waits 1000 ms`, and costs nothing when nothing else can
-happen; how time moved is not part of the history, so two runs that waited
-differently for the same timers are one state. A `SystemError` is also a
+happen; a timer that is due may also fire late, after a wait, as a
+deviation. How time moved is not part of the history, so two runs that
+waited differently for the same timers are one state. A
+`timeoutSignal`'s timer is unreferenced, as the platform's is: its
+deadline holds across every request the signal is passed to, and time
+moves to it only while a request is in flight or a callback is late. A `SystemError` is also a
 message to a part that does not exist, a rebuilt part that differs from
 the live one, which the search checks whenever it resumes one, and a
 request the model cannot carry, such as one with a body that is not a
