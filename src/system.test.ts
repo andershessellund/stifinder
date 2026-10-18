@@ -132,6 +132,66 @@ describe('system: the step', () => {
     await expect(check(system({ a: bad }))).rejects.toThrow(/"a"'s value is not a value/);
   });
 
+  it('a runtime a failed step changed is forgotten: the next step at that value rebuilds it', async () => {
+    // At 1, `boom` changes the runtime and then throws; `ok` is the other way on.
+    const kind = valuePart<number, 'go' | 'boom' | 'ok'>({
+      initial: () => 0,
+      events: (value) => (value === 0 ? [{ event: 'go', expected: true }] : value === 1 ? [{ event: 'boom', expected: true }, { event: 'ok' }] : []),
+      ingest(cell, event) {
+        if (event === 'go') cell.value = 1;
+        else if (event === 'ok') cell.value = 2;
+        else {
+          cell.value = 100;
+          throw new Error('boom');
+        }
+      },
+      receive() {},
+    });
+    for (const rebuildCheck of [true, false]) {
+      const space = await exploreIteratively(system({ a: kind }, { rebuildCheck }), { stopOnViolation: false });
+      expect(space.violation?.error).toEqual(new Error('boom'));
+      expect([...space.costs.keys()].map((state) => partsOf(state).get('a')).sort()).toEqual([0, 1, 2]);
+    }
+  });
+
+  it('an ingest or receive that returns a promise is a SystemError: a part\'s work is synchronous', async () => {
+    const lazy = valuePart<number, 'go'>({
+      initial: () => 0,
+      events: (value) => (value === 0 ? [{ event: 'go', expected: true }] : []),
+      // The misuse under test.
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises
+      ingest: async (cell) => {
+        cell.value = 1;
+      },
+      receive() {},
+    });
+    await expect(check(system({ a: lazy }))).rejects.toThrow(/"a"'s ingest returned a promise: a part's work is synchronous/);
+  });
+
+  it('events that throw are the test\'s error from a step too, as they are from getEvents', async () => {
+    const broken = valuePart<number, 'go'>({
+      initial: () => 0,
+      events: (value) => {
+        if (value === 1) throw new Error('no events for 1');
+        return [{ event: 'go', expected: true }];
+      },
+      ingest(cell) {
+        cell.value = 1;
+      },
+      receive() {},
+    });
+    await expect(check(system({ a: broken }))).rejects.toThrow(new SystemError('"a"\'s events threw: no events for 1'));
+  });
+
+  it('a harness error a kind recorded between steps is raised at the system\'s next step, whichever part it is', async () => {
+    const recorded: { fault: SystemError | undefined } = { fault: undefined };
+    const faulty = { ...offering({ a: [{ event: 'tick', expected: true, to: 'b' }] }), fault: () => recorded.fault };
+    const model = system({ a: faulty, b: pinger('a', 2) });
+    expect(await model.getEvents(model.initialState)).toHaveLength(2);
+    recorded.fault = new SystemError('a timer fired after the step');
+    await expect(check(model)).rejects.toThrow(recorded.fault);
+  });
+
   it('after a harness error the search of that model is over: every later call meets it', async () => {
     const model = system({ a: pinger('nobody', 1) });
     await expect(check(model)).rejects.toThrow(SystemError);
@@ -250,9 +310,11 @@ describe('system: the properties and the report', () => {
 // ---------------------------------------------------------------------------
 // The differential oracle: random systems of value parts, against the
 // product written straight from the rules. The eager product knows
-// nothing of restoring, messages as mail, the active set or the touched
-// set: a state is every part's state, an event is applied at once, and
-// what a part sends is given to the receiver on the spot, in the order sent.
+// nothing of restoring, the active set or the touched set: a state is
+// every part's state, an event is applied at once, and what a part sends
+// is a queue delivered in the order sent, a receiver's sends joining the
+// end (D40). A receive sends only to parts later in the order, so that a
+// step ends.
 // ---------------------------------------------------------------------------
 
 /** A seeded random stream (mulberry32): the same seed, the same systems. */
@@ -276,8 +338,10 @@ interface EventSpec {
 interface PartSpec {
   /** Per state, the events it offers. */
   events: EventSpec[][];
-  /** Per state and message, the state a received message leads to; absent means ignored. */
-  receives: Record<string, number>;
+  /** Per state and message, the state a received message leads to, and what
+   *  it sends on, only to parts later in the order, so a step ends; absent
+   *  means ignored. */
+  receives: Record<string, { to: number; sends: { peer: number; message: number }[] }>;
 }
 interface SystemSpec {
   parts: PartSpec[];
@@ -293,7 +357,7 @@ function randomSpec(r: ReturnType<typeof random>): SystemSpec {
   for (let i = 0; i < n; i++) {
     const states = 1 + r.int(3);
     const events: EventSpec[][] = [];
-    const receives: Record<string, number> = {};
+    const receives: PartSpec['receives'] = {};
     for (let s = 0; s < states; s++) {
       events.push(
         Array.from({ length: r.int(3) }, () => ({
@@ -303,7 +367,14 @@ function randomSpec(r: ReturnType<typeof random>): SystemSpec {
           sends: Array.from({ length: r.int(3) }, () => ({ peer: r.int(n), message: r.int(2) })),
         })),
       );
-      for (let m = 0; m < 2; m++) if (r.chance(0.7)) receives[`${s}:${m}`] = r.int(states);
+      for (let m = 0; m < 2; m++) {
+        if (!r.chance(0.7)) continue;
+        const later = n - i - 1;
+        receives[`${s}:${m}`] = {
+          to: r.int(states),
+          sends: later === 0 ? [] : Array.from({ length: r.int(3) }, () => ({ peer: i + 1 + r.int(later), message: r.int(2) })),
+        };
+      }
     }
     parts.push({ events, receives });
   }
@@ -324,8 +395,11 @@ function toSystem(spec: SystemSpec): Model<SystemState, SystemEvent> {
           cell.value = event.to;
           for (const { peer, message } of event.sends) step.send(partId(peer), message);
         },
-        receive(cell, _from, message) {
-          cell.value = part.receives[`${cell.value}:${message as number}`] ?? cell.value;
+        receive(cell, _from, message, step) {
+          const on = part.receives[`${cell.value}:${message as number}`];
+          if (on === undefined) return;
+          cell.value = on.to;
+          for (const { peer, message: next } of on.sends) step.send(partId(peer), next);
         },
       }),
     ]),
@@ -352,7 +426,14 @@ function toEager(spec: SystemSpec): Model<Tuple, { part: number; k: number }> {
       const next = [...tuple];
       const event = spec.parts[part]!.events[tuple[part]!]![k]!;
       next[part] = event.to;
-      for (const { peer, message } of event.sends) next[peer] = spec.parts[peer]!.receives[`${next[peer]!}:${message}`] ?? next[peer]!;
+      // The mail: what a part sends is delivered after its work, in the order sent, and what a receiver sends joins the end.
+      const mail = [...event.sends];
+      for (let item = mail.shift(); item !== undefined; item = mail.shift()) {
+        const on = spec.parts[item.peer]!.receives[`${next[item.peer]!}:${item.message}`];
+        if (on === undefined) continue;
+        next[item.peer] = on.to;
+        mail.push(...on.sends);
+      }
       return { to: next };
     },
     ...(spec.bad === null ? {} : { invariant: (tuple) => (deepEqual(tuple.slice(0, 2), spec.bad) ? { error: 'bad' } : undefined) }),

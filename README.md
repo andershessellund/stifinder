@@ -322,14 +322,22 @@ decides. The code must be a function of its inputs: one that draws
 `Math.random()`, reads the clock, or keeps state in a module between runs
 departs from its log on replay, and that is a **`SystemError`**, the test's
 error, never a violation; the host's `random()` and `uuid()` are a seeded
-stream for that reason. And a step is complete on the microtask queue: a
-real timer set by the code fires after the step, outside the model, and a
-host call from it is a `SystemError` too. A timer the code needs is the
-host's, which the search advances as an event. Time is local to each part
-and relative, so a wait reads `client waits 1000 ms`, and costs nothing
-when nothing else can happen. A `SystemError` is also a message to a part
-that does not exist, and a rebuilt part that differs from the live one,
-which the search checks whenever it resumes one.
+stream, per part, for that reason. And a step is complete on the
+microtask queue: work the code hands to the platform — a real timer, and
+also `crypto.subtle`, a compression stream, the file system — finishes
+after the step, outside the model, where the search cannot see it. A host
+call from such work is a `SystemError` when the model notices it, which it
+does when the call comes after the step; one that lands inside the step's
+own yield passes as the code's, so the rule is the code's to keep, not the
+search's to enforce. A timer the code needs is the host's, which the
+search advances as an event. Time is local to each part and relative, so a
+wait reads `client waits 1000 ms`, and costs nothing when nothing else can
+happen; how time moved is not part of the history, so two runs that waited
+differently for the same timers are one state. A `SystemError` is also a
+message to a part that does not exist, a rebuilt part that differs from
+the live one, which the search checks whenever it resumes one, and a
+request the model cannot carry, such as one with a body that is not a
+string.
 
 **Parts of your own.** A part is a `Kind`: the value it starts from, the
 events its value allows (of the value alone, so that a system of a thousand
@@ -343,8 +351,9 @@ it, if the system's `kindOf` knows its kind. How it all works is
 [DESIGN.md §9.4](DESIGN.md#94-systems-of-parts).
 
 **Where the host lives.** `stifinder/host` exports `Host`, `Timer` and
-`webHost()` and imports nothing, so production code that takes a host
-carries none of the search.
+`webHost()` and imports nothing, so a production bundle that takes a host
+carries none of the search; stifinder itself is then in the dependency
+list, as the package `webHost` comes from.
 
 ## Reading a result
 

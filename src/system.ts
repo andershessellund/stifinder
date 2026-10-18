@@ -30,7 +30,8 @@
 // A `SystemError` is the test's error, not the system's failure: a message
 // to a part that does not exist, code that departs from its log on replay,
 // a host call outside a step, a rebuilt part that differs from the live
-// one. The search rejects with it, as with a `DecisionsError` (D37).
+// one, an `ingest` that is asynchronous. The search rejects with it, as
+// with a `DecisionsError` (D37).
 //
 // Why: DECISIONS.md D38 to D44.
 // ---------------------------------------------------------------------------
@@ -81,6 +82,10 @@ export interface Kind<Value, Runtime, Event> {
   receive(runtime: Runtime, from: string, message: unknown, step: Step): void;
   /** The value back, after a step. */
   snapshot(runtime: Runtime): Value;
+  /** A harness error the kind recorded outside a step — a host call from
+   *  work the model does not see — for the system to raise at its next
+   *  step. */
+  fault?(): SystemError | undefined;
   /** How an event of a part with this value reads, for a report. */
   describeEvent?(event: Event, value: Value, id: string): string;
   /** How a value reads, for a report. */
@@ -247,6 +252,22 @@ export function system<Parts extends Record<string, AnyKind>>(parts: Parts, opti
     return found;
   };
   const isActive = (id: string, value: unknown): boolean => kindAt(id).events(value).length > 0;
+  /** A harness error any kind has recorded since its last step. */
+  const recorded = (): SystemError | null => {
+    for (const kind of kinds.values()) {
+      const fault = kind.fault?.();
+      if (fault !== undefined) return fault;
+    }
+    return null;
+  };
+  /** `ingest` and `receive` are synchronous: a step is over when its drain is, which a promise would outlive. */
+  const synchronous = (id: string, what: string, returned: unknown): void => {
+    if (returned instanceof Promise) {
+      // Nothing waits for it: the step has moved on without it.
+      returned.catch(() => undefined);
+      throw new SystemError(`${JSON.stringify(id)}'s ${what} returned a promise: a part's work is synchronous, and its microtasks run before the step ends`);
+    }
+  };
   /** Part order: the parts named, as named, then the rest by id. */
   const inPartOrder = (ids: Iterable<string>): string[] => {
     const present = new Set(ids);
@@ -293,17 +314,23 @@ export function system<Parts extends Record<string, AnyKind>>(parts: Parts, opti
       },
     });
 
-    kindAt(part).ingest(await restored(part), event, stepFor(part));
-    await _drain();
-    for (let next = mail.shift(); next !== undefined; next = mail.shift()) {
-      messages.push(next);
-      kindAt(next.to).receive(await restored(next.to), next.from, next.message, stepFor(next.to));
+    try {
+      synchronous(part, 'ingest', kindAt(part).ingest(await restored(part), event, stepFor(part)));
       await _drain();
+      for (let next = mail.shift(); next !== undefined; next = mail.shift()) {
+        messages.push(next);
+        synchronous(next.to, 'receive', kindAt(next.to).receive(await restored(next.to), next.from, next.message, stepFor(next.to)));
+        await _drain();
+      }
+      const values = new Map<string, unknown>();
+      for (const [id, { kind, runtime }] of runtimes) values.set(id, canonical(id, kind.snapshot(runtime)));
+      if (resume) for (const [id, { runtime }] of runtimes) live.set(id, { runtime, value: values.get(id) });
+      return { values, messages, resumed };
+    } catch (error) {
+      // A runtime the step changed before it failed is no longer at any value: forget it.
+      if (resume) for (const id of runtimes.keys()) live.delete(id);
+      throw error;
     }
-    const values = new Map<string, unknown>();
-    for (const [id, { kind, runtime }] of runtimes) values.set(id, canonical(id, kind.snapshot(runtime)));
-    if (resume) for (const [id, { runtime }] of runtimes) live.set(id, { runtime, value: values.get(id) });
-    return { values, messages, resumed };
   }
 
   /** How a step with live runtimes differed from one rebuilt, or null. */
@@ -329,6 +356,7 @@ export function system<Parts extends Record<string, AnyKind>>(parts: Parts, opti
     initialState: stateOf(initial),
 
     getEvents(state) {
+      harness ??= recorded();
       if (harness !== null) throw harness;
       const product = productOf(state);
       const offers = inPartOrder(product.active).flatMap((part) =>
@@ -350,6 +378,7 @@ export function system<Parts extends Record<string, AnyKind>>(parts: Parts, opti
     },
 
     async applyEvent(state, { part, event }) {
+      harness ??= recorded();
       if (harness !== null) return { to: stateOf(POISON) };
       const product = productOf(state);
       try {
@@ -364,7 +393,14 @@ export function system<Parts extends Record<string, AnyKind>>(parts: Parts, opti
         let { parts: values, active } = product;
         for (const [id, value] of step.values) {
           values = values.with(id, value);
-          active = isActive(id, value) ? active.added(id) : active.deleted(id);
+          let hasEvents: boolean;
+          try {
+            hasEvents = isActive(id, value);
+          } catch (error) {
+            // As a throw from `getEvents`: the test's error, not the system's failure.
+            throw error instanceof SystemError ? error : new SystemError(`${JSON.stringify(id)}'s events threw: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          active = hasEvents ? active.added(id) : active.deleted(id);
         }
         return { to: stateOf({ parts: values, active }) };
       } catch (error) {

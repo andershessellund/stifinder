@@ -182,6 +182,23 @@ describe('http', () => {
     expect(cell.value).toEqual({ inFlight: [], inProgress: {} });
   });
 
+  it('a URL is routed to the longest route it is under, not to a route it merely starts with', async () => {
+    const routed = http({ 'https://api.test': 'short', 'https://api.test/v2': 'long', 'https://api.testing.com/': 'other' });
+    const where = async (url: string) => {
+      const cell = await routed.restore('net', routed.initial('net'));
+      routed.receive(cell, 'client', { fetch: get(url), pos: 0 }, recording().step);
+      return (cell.value.inFlight[0] as { server: string }).server;
+    };
+    expect(await where('https://api.test')).toBe('short');
+    expect(await where('https://api.test/v1/x')).toBe('short');
+    expect(await where('https://api.test?x=1')).toBe('short');
+    expect(await where('https://api.test/v2')).toBe('long');
+    expect(await where('https://api.test/v2/things')).toBe('long');
+    expect(await where('https://api.test/v22')).toBe('short');
+    expect(await where('https://api.testing.com/x')).toBe('other');
+    await expect(where('https://api.testing.org/x')).rejects.toThrow(SystemError);
+  });
+
   it('no route, an answer with nothing in progress, and a message it does not understand are SystemErrors', async () => {
     const cell = await fresh();
     const { step } = recording();

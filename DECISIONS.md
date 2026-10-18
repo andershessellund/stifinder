@@ -966,7 +966,9 @@ and every message that crosses a boundary passes through the system,
 which is the trace D29's recorder was for. The live cache is the system's
 and not the kind's so that the system knows when it resumed, which is
 when the rebuild check has anything to compare; and so that a kind is
-simpler to write. Two replays at once would interleave their microtasks,
+simpler to write. A step that throws forgets the live runtimes it
+touched: one changed before the failure is at no value, and resumed it
+gave a bogus rebuild-check failure, which the review of 0.3 found. Two replays at once would interleave their microtasks,
 and a divergence would show nondeterministically. **Rejected** (held for a
 day, 2026-10-18): a typed call on a peer's runtime, reached by id through
 the step, with the step restoring the peer on the way. The sender would
@@ -985,10 +987,13 @@ its requests, its timers firing, its clock moving, the requests it sent
 and gave up on — with its pending timers and what `main` settled with.
 `restore` runs `main` again with the log replayed: inputs fed back,
 outputs compared with the log. A difference is recorded by the host and
-raised once the drain is over, as a `SystemError`; so is a host call after
-the step was over, raised at the part's next step; and the search rejects
-with a `SystemError`, as with a `DecisionsError` (D37), through one poison
-state whose `getEvents` throws it. Requests and answers are values at the
+raised once the drain is over, as a `SystemError`; so is a request the
+model cannot carry, raised when the step is snapshotted; so is a host call
+after the step was over, recorded on the kind and raised by the system at
+its next step, through the kind's `fault()`. None is thrown into the code,
+which waits on a promise that never settles; the search rejects with a
+`SystemError`, as with a `DecisionsError` (D37), through one poison state
+whose `getEvents` throws it. Requests and answers are values at the
 boundary, and the host rebuilds `Request` and `Response` on its side.
 
 **Why.** The log is the one thing a restart cannot reconstruct, and
@@ -998,7 +1003,14 @@ state that survives — and that is the test's error, not the system's
 failure, so it must reject the search and not become a violation path.
 **Rejected:** throwing the difference into the code. Retry code catches
 everything and carries on, and only the final "settled differently" check
-caught a random URL, in the prototype. **Rejected:** a live `Response`
+caught a random URL, in the prototype; the review of 0.3 found the same of
+a request that was not a value, thrown into the code as a rejection, and
+of a late abort, thrown out of the signal's listener as an uncaught
+exception. **Cost.** The model cannot see work the code hands to the
+platform — a real timer, `crypto.subtle`, a compression stream — which
+finishes after the step; a host call from it is caught when it comes
+after the step, and passes as the code's when it lands inside the step's
+own yield. The rule is the code's to keep (D37), and the docs say so. **Rejected:** a live `Response`
 passed across, which would couple two runtimes; and a replay that re-sent
 its requests, which would double what the network holds, and with
 messages cannot. **Rejected:** reporting the failure of `main` as a
@@ -1012,27 +1024,37 @@ Open.
 
 ### D42. Time is local, relative and never read; a timeout signal's timer goes with its request
 
-Each program part keeps its timers as distances to fire, in due order and
-registration order at equal dues (the HTML rule); an advance subtracts
-and what reaches zero is due. The part expects to fire the head of its due
-queue; its other events are one advance per distinct distance among its
-timers, never expected, so time proceeds only when nothing else can
-happen, and one advance past several wake-ups is one event and one
-deviation. The clock is never read. `random` and `uuid` are a seeded
-stream, the same on replay. A `timeoutSignal`'s timer is dropped once the
-request it guarded has settled.
+Each program part keeps its timers as distances to fire, each with an id,
+in due order and registration order at equal dues (the HTML rule); an
+advance subtracts and what reaches zero is due. The part expects to fire
+the head of its due queue; its other events are one advance per distinct
+distance among its timers, never expected, so time proceeds only when
+nothing else can happen, and one advance past several wake-ups is one
+event and one deviation. The log records which timer fired, never an
+advance: a restore matches the timers the code set to the value's by id
+and gives them the value's distances. The clock is never read. `random`
+and `uuid` are a seeded stream, from the seed and the part's id, the same
+on replay. A `timeoutSignal`'s timer is dropped once every request it
+guarded has settled.
 
-**Why.** No absolute time in the state, so a part whose tick changes
-nothing returns to the same state, the space of a periodic system can be
-finite, and a search over it can be exhaustive. A delivery is instant on
-the baseline and a timeout fires only as a deviation, except after a loss,
+**Why.** No absolute time in the state, so a value part whose tick
+changes nothing returns to the same state, the space of a periodic value
+part can be finite, and a search over it can be exhaustive; a program
+part's log grows by an entry per timer fired, so its periodic space does
+not end until checkpoints fold it (Open). A delivery is instant on the
+baseline and a timeout fires only as a deviation, except after a loss,
 when nothing is expected and the first advance is free: a lost message and
 its timeout cost one deviation together. A long stall is one fault in the
 world, so one advance past several wake-ups is one deviation where
-advancing one at a time is as many; the states the two ways reach merge.
-`AbortSignal.timeout`'s timer is one the platform does not wait for, and
-once its request has settled it could only abort a signal nobody listens
-to; kept, it padded every trace with timers firing to nobody.
+advancing one at a time is as many; the states the two ways reach merge,
+which is why an advance is not logged — logged, it was in the history, and
+the review of 0.3 found the two ways apart. `AbortSignal.timeout`'s timer
+is one the platform does not wait for, and once every request on it has
+settled it could only abort a signal nobody listens to; kept, it padded
+every trace with timers firing to nobody; dropped at the first request's
+settling, it cut short a deadline shared by a batch, which the review
+found. Two parts with one seed drew the same idempotency key, which the
+review found too; the id is mixed in.
 **Rejected:** absolute time in the state, which grows without bound and
 makes every tick a new state. **Rejected:** orderings alone, with no
 distances: placing a newly set timer among a part's pending ones needs
@@ -1044,8 +1066,9 @@ made-up number with which the baseline needed an "early" beside its
 late already. **Rejected:** logging the random draws, which a seeded
 stream makes a function of the history. **Deferred:** one aligned clock
 advancing every part together, clock reads, and the turn; see Open.
-**Cost.** A signal of the code's own, used for two requests in turn, loses
-its timer when the first settles; an unusual use, noted in DESIGN.md.
+**Cost.** A timer's id is a counter, so two histories that set different
+numbers of timers and cleared them do not merge, though their logs would;
+rare, and the log keeps most such histories apart already.
 
 ### D43. One network part names requests by position, and its faults are silence and a failed connection
 
@@ -1118,11 +1141,15 @@ code may take the ones it uses apart.
 **Why.** A client that makes an idempotency key with `crypto.randomUUID()`
 diverges on replay, and a retry that waits needs a timer, so the host is
 how real code gets a platform the search controls, and it must be
-importable by production code at no cost. **Rejected:** the root only,
-which would put a testing library in production bundles' dependency lists;
-a separate package, a release of its own for forty lines. **Rejected:**
-methods on the interface, which lint flags when destructured. **Deferred:**
-clock reads, a key not being a time (Open). Revises D30.
+importable by production code at no cost to the bundle. **Rejected:** the
+root only, which would put the search in every production bundle that
+calls `webHost()`; a separate package, a release of its own for forty
+lines. **Rejected:** methods on the interface, which lint flags when
+destructured. **Cost.** stifinder is still in the dependency list of a
+package that calls `webHost()`, and its valsem peer with it; only the
+bundle stays clean. A separate package is what would take it out of the
+list, if that comes to matter. **Deferred:** clock reads, a key not being a
+time (Open). Revises D30.
 
 ## Non-goals
 

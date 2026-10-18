@@ -84,19 +84,36 @@ describe('program: the host', () => {
     expect(value().result).toEqual({ value: [201, 202] });
   });
 
-  it('a request that is not a value is refused: a body that is not a string, a Request with a body', async () => {
-    const errors: string[] = [];
-    await started(async (host) => {
-      for (const init of [{ method: 'POST', body: new Uint8Array(1) }, { method: 'POST', body: new FormData() }]) {
-        await host.fetch(url, init).catch((e: Error) => errors.push(e.message));
+  it('a request that is not a value is the test\'s error, recorded for the system and never thrown into the code', async () => {
+    let caught = 'nothing';
+    const { kind, runtime, sent } = await started(async (host) => {
+      try {
+        await host.fetch(url, { method: 'POST', body: new Uint8Array(1) });
+      } catch (error) {
+        caught = (error as Error).message;
       }
-      await host.fetch(new Request(url, { method: 'POST', body: 'x' })).catch((e: Error) => errors.push(e.message));
     });
-    expect(errors).toEqual([
-      'stifinder: a request body under program() must be a string: a stream, blob or form is not a value',
-      'stifinder: a request body under program() must be a string: a stream, blob or form is not a value',
-      'stifinder: a Request with a body under program() is not a value: pass the body as a string in init',
-    ]);
+    expect(caught).toBe('nothing');
+    expect(sent).toEqual([]);
+    expect(() => kind.snapshot(runtime)).toThrow(new SystemError('a request body under program() must be a string: a stream, blob or form is not a value'));
+    const other = await started((host) => host.fetch(new Request(url, { method: 'POST', body: 'x' })));
+    expect(() => other.kind.snapshot(other.runtime)).toThrow(/a Request with a body under program\(\) is not a value/);
+  });
+
+  it('a GET with a body is the code\'s error, as the platform has it', async () => {
+    const { value, sent } = await started((host) => host.fetch(url, { body: 'x' }).catch((e: Error) => `${e.name}: ${e.message}`));
+    expect(sent).toEqual([]);
+    expect(value().result).toEqual({ value: 'TypeError: Request with GET/HEAD method cannot have body' });
+  });
+
+  it('an answer no Response can be is the server part\'s error', async () => {
+    const { kind, runtime, step } = await started((host) => host.fetch(url));
+    expect(() => kind.receive(runtime, 'net', { pos: 0, response: { status: 204, body: '' } }, step)).toThrow(SystemError);
+    expect(() => kind.receive(runtime, 'net', { pos: 0, response: { status: 199 } }, step)).toThrow(/an answer with status 199 is not one a Response can be/);
+    // The request is still outstanding: nothing was settled by a failed delivery.
+    kind.receive(runtime, 'net', { pos: 0, response: { status: 200 } }, step);
+    await drain();
+    expect(kind.snapshot(runtime).result).toEqual({ value: { status: 200 } });
   });
 
   it('a fetch with a signal already aborted rejects with its reason, and sends nothing', async () => {
@@ -115,25 +132,35 @@ describe('program: timers', () => {
       host.setTimeout(() => fired.push('c'), 50);
       host.setTimeout(() => fired.push('d'), 0);
     });
-    expect(value().timers.toArray()).toEqual([{ distance: 0 }, { distance: 50 }, { distance: 50 }, { distance: 100 }]);
-    expect(kind.events(value())).toEqual([{ event: { fire: 0 }, expected: true }]);
-    kind.ingest(runtime, { fire: 0 }, step);
+    expect(value().timers.toArray()).toEqual([
+      { id: 4, distance: 0 },
+      { id: 2, distance: 50 },
+      { id: 3, distance: 50 },
+      { id: 1, distance: 100 },
+    ]);
+    expect(kind.events(value())).toEqual([{ event: { fire: 4 }, expected: true }]);
+    kind.ingest(runtime, { fire: 4 }, step);
     await drain();
     expect(fired).toEqual(['d']);
     expect(kind.events(value())).toEqual([{ event: { advance: 50 } }, { event: { advance: 100 } }]);
     kind.ingest(runtime, { advance: 50 }, step);
     await drain();
-    expect(value().timers.toArray()).toEqual([{ distance: 0 }, { distance: 0 }, { distance: 50 }]);
-    kind.ingest(runtime, { fire: 0 }, step);
-    kind.ingest(runtime, { fire: 0 }, step);
+    expect(value().timers.toArray()).toEqual([
+      { id: 2, distance: 0 },
+      { id: 3, distance: 0 },
+      { id: 1, distance: 50 },
+    ]);
+    kind.ingest(runtime, { fire: 2 }, step);
+    kind.ingest(runtime, { fire: 3 }, step);
     kind.ingest(runtime, { advance: 50 }, step);
-    kind.ingest(runtime, { fire: 0 }, step);
+    kind.ingest(runtime, { fire: 1 }, step);
     await drain();
     expect(fired).toEqual(['d', 'b', 'c', 'a']);
     expect(kind.events(value())).toEqual([]);
-    expect(logOf(value())).toEqual([{ fired: 0 }, { advanced: 50 }, { fired: 0 }, { fired: 0 }, { advanced: 50 }, { fired: 0 }]);
+    // The advances are not in the log: how time moved is not part of the history.
+    expect(logOf(value())).toEqual([{ fired: 4 }, { fired: 2 }, { fired: 3 }, { fired: 1 }]);
     expect(kind.describeEvent?.({ advance: 50 }, value(), 'client')).toBe('client waits 50 ms');
-    expect(kind.describeEvent?.({ fire: 0 }, value(), 'client')).toBe('a timer of client fires');
+    expect(kind.describeEvent?.({ fire: 1 }, value(), 'client')).toBe('a timer of client fires');
     expect(kind.describeEvent?.('start', value(), 'client')).toBe('client starts');
   });
 
@@ -148,10 +175,10 @@ describe('program: timers', () => {
         if (n === 2) host.clearInterval(every);
       }, 10);
     });
-    expect(value().timers.toArray()).toEqual([{ distance: 10, interval: 10 }]);
+    expect(value().timers.toArray()).toEqual([{ id: 2, distance: 10, interval: 10 }]);
     for (let i = 0; i < 2; i++) {
       kind.ingest(runtime, { advance: 10 }, step);
-      kind.ingest(runtime, { fire: 0 }, step);
+      kind.ingest(runtime, { fire: 2 }, step);
       await drain();
     }
     expect(fired).toEqual([1, 2]);
@@ -161,13 +188,13 @@ describe('program: timers', () => {
   it('timeoutSignal aborts the fetch when its timer fires: the request is aborted, logged, and the network told', async () => {
     const { kind, runtime, step, sent, value } = await started((host) => host.fetch(url, { signal: host.timeoutSignal(100) }).catch((e: Error) => e.name));
     kind.ingest(runtime, { advance: 100 }, step);
-    kind.ingest(runtime, { fire: 0 }, step);
+    kind.ingest(runtime, { fire: 1 }, step);
     await drain();
     expect(sent).toEqual([
       { to: 'net', message: { fetch: { method: 'GET', url }, pos: 0 } },
       { to: 'net', message: { abort: 0 } },
     ]);
-    expect(logOf(value())).toEqual([{ sent: { method: 'GET', url } }, { advanced: 100 }, { fired: 0 }, { aborted: 0 }]);
+    expect(logOf(value())).toEqual([{ sent: { method: 'GET', url } }, { fired: 1 }, { aborted: 0 }]);
     expect(value().result).toEqual({ value: 'TimeoutError' });
   });
 
@@ -192,10 +219,44 @@ describe('program: timers', () => {
     await drain();
     expect(value().timers.length).toBe(1);
     kind.ingest(runtime, { advance: 100 }, step);
-    kind.ingest(runtime, { fire: 0 }, step);
+    kind.ingest(runtime, { fire: 1 }, step);
     await drain();
     expect(sent).toHaveLength(1);
     expect(value().result).toEqual({ value: 200 });
+  });
+
+  it('one timeout signal guarding several requests keeps its timer until the last of them settles', async () => {
+    const { kind, runtime, step, sent, value } = await started((host) => {
+      const signal = host.timeoutSignal(1000);
+      return Promise.all([host.fetch(`${url}/a`, { signal }), host.fetch(`${url}/b`, { signal })]).then(() => 'both', (e: Error) => e.name);
+    });
+    kind.receive(runtime, 'net', { pos: 0, response: { status: 200 } }, step);
+    await drain();
+    expect(value().timers.length).toBe(1);
+    kind.ingest(runtime, { advance: 1000 }, step);
+    kind.ingest(runtime, { fire: 1 }, step);
+    await drain();
+    expect(sent.at(-1)).toEqual({ to: 'net', message: { abort: 0 } });
+    expect(value().result).toEqual({ value: 'TimeoutError' });
+    expect(value().timers.length).toBe(0);
+  });
+
+  it('histories that differ only in how time moved are one state', async () => {
+    const main = (host: Host) => {
+      host.setTimeout(() => undefined, 10);
+      host.setTimeout(() => undefined, 20);
+    };
+    const one = await started(main);
+    one.kind.ingest(one.runtime, { advance: 20 }, one.step);
+    one.kind.ingest(one.runtime, { fire: 1 }, one.step);
+    one.kind.ingest(one.runtime, { fire: 2 }, one.step);
+    const two = await started(main);
+    two.kind.ingest(two.runtime, { advance: 10 }, two.step);
+    two.kind.ingest(two.runtime, { fire: 1 }, two.step);
+    two.kind.ingest(two.runtime, { advance: 10 }, two.step);
+    two.kind.ingest(two.runtime, { fire: 2 }, two.step);
+    await drain();
+    expect(deepEqual(one.value(), two.value())).toBe(true);
   });
 });
 
@@ -227,6 +288,29 @@ describe('program: replay', () => {
     await drain();
     expect(sent).toEqual([]);
     expect(kind.snapshot(rebuilt).result).toEqual({ value: 200 });
+  });
+
+  it('restore sets the timers from the value, by id, whatever the advances were', async () => {
+    const fired: number[] = [];
+    const { kind, runtime, step, value } = await started((host) => {
+      host.setTimeout(() => fired.push(1), 100);
+      host.setTimeout(() => fired.push(2), 30);
+      host.setTimeout(() => fired.push(3), 50);
+    });
+    kind.ingest(runtime, { advance: 30 }, step);
+    kind.ingest(runtime, { fire: 2 }, step);
+    kind.ingest(runtime, { advance: 10 }, step);
+    await drain();
+    const before = value();
+    expect(before.timers.toArray()).toEqual([
+      { id: 3, distance: 10 },
+      { id: 1, distance: 60 },
+    ]);
+    const rebuilt = await kind.restore('client', before);
+    expect(deepEqual(kind.snapshot(rebuilt), before)).toBe(true);
+    const later = recording();
+    kind.ingest(rebuilt, { advance: 10 }, later.step);
+    expect(kind.events(kind.snapshot(rebuilt))).toEqual([{ event: { fire: 3 }, expected: true }]);
   });
 
   it('a value not started restores to a runtime not started', async () => {
@@ -273,15 +357,55 @@ describe('program: replay', () => {
     expect(other.sent).not.toEqual(sent);
   });
 
-  it('a host call after the step is over is the test\'s error, raised at the part\'s next step', async () => {
+  it('a host call after the step is over is the test\'s error: recorded for the system, raised at the next step, never thrown into the code', async () => {
+    let settled = 'no';
     const { kind, runtime, step, value } = await started((host) => {
-      setTimeout(() => void host.fetch(url).catch(() => undefined), 1);
+      setTimeout(() => {
+        void host.fetch(url).then(
+          () => (settled = 'resolved'),
+          () => (settled = 'rejected'),
+        );
+      }, 1);
     });
     const before = value();
     await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe('no');
     const late = /client called its host after its step was over: work left on the macrotask queue, a real timer above all, is not part of the model/;
+    expect(kind.fault?.()).toBeInstanceOf(SystemError);
+    expect(kind.fault?.()?.message).toMatch(late);
     expect(() => kind.ingest(runtime, { advance: 1 }, step)).toThrow(late);
     await expect(kind.restore('client', before)).rejects.toThrow(late);
+  });
+
+  it('a late abort from the code\'s own timer rejects the code\'s promise, and is recorded, not thrown out of the listener', async () => {
+    let outcome = 'pending';
+    const { kind, value } = await started((host) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new Error('late')), 1);
+      return host.fetch(url, { signal: controller.signal }).then(
+        () => (outcome = 'resolved'),
+        (e: Error) => (outcome = e.message),
+      );
+    });
+    value(); // the step is over
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(outcome).toBe('late');
+    expect(kind.fault?.()?.message).toMatch(/after its step was over/);
+  });
+
+  it('two parts draw different random streams, and the same part the same one on every run', async () => {
+    const draws = new Map<string, number[]>();
+    const kind = program((host) => {
+      draws.set(host.uuid().slice(0, 8), [host.random(), host.random()]);
+    });
+    for (const id of ['alice', 'bob', 'alice']) {
+      const runtime = await kind.restore(id, kind.initial(id));
+      kind.ingest(runtime, 'start', recording().step);
+    }
+    await drain();
+    expect(draws.size).toBe(2);
+    const [a, b] = [...draws.values()];
+    expect(a).not.toEqual(b);
   });
 });
 

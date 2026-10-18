@@ -4,26 +4,32 @@
 // The code is `main(host)`, run for real; the host is the simulated
 // platform it takes `fetch`, its timers and its randomness from. The part's
 // value is the log of what the host delivered and took, in order — the
-// answers and failures of its requests, its timers firing, its clock
-// moving, the requests it sent and aborted — with its pending timers as
-// distances to fire, and what `main` settled with once it has. Its runtime
-// is the code, running: `restore` runs `main` again with the log replayed,
-// inputs fed back and outputs compared with the log, and the system
-// resumes the live runtime where the value matches.
+// answers and failures of its requests, its timers firing, the requests it
+// sent and aborted — with its pending timers as distances to fire, and what
+// `main` settled with once it has. Its runtime is the code, running:
+// `restore` runs `main` again with the log replayed, inputs fed back and
+// outputs compared with the log, and the system resumes the live runtime
+// where the value matches.
 //
 // Time is local and relative: a timer is a distance to fire, an advance
 // subtracts, and the clock is never read. The part expects to fire the
 // head of its due queue; its other events are advances to its pending
 // timers' distances, never expected, since time proceeds only when nothing
-// else can happen. A `timeoutSignal`'s timer is dropped once the request it
-// guarded has settled: the platform does not wait for such a timer, and it
-// could then only abort a signal nobody listens to. Randomness is a seeded
-// stream, so a replay draws the same numbers and no draw is logged.
+// else can happen. The log records which timer fired and never an advance,
+// so histories that differ only in how time moved are one state: a timer
+// is named by an id of its own, and a restore sets the distances from the
+// value. A `timeoutSignal`'s timer is dropped once every request it guarded
+// has settled: the platform does not wait for such a timer, and it could
+// then only abort a signal nobody listens to. Randomness is a seeded
+// stream, seeded by the part's id too, so a replay draws the same numbers
+// and no draw is logged.
 //
-// A difference on replay is recorded by the host and raised by `restore`
-// once the drain is over: it is not thrown into the code, which may catch
-// it. A host call after the step is over — from a real timer above all —
-// is the test's error too, raised at the part's next step.
+// A difference on replay, a request that is not a value, and a host call
+// after the step is over — from a real timer above all — are the test's
+// errors. None is thrown into the code, which may catch it: each is
+// recorded by the host and raised by the system, a difference by
+// `restore` once the drain is over, the others at the next step. The code
+// that made such a call waits on a promise that never settles.
 //
 // Why: DECISIONS.md D41, D42.
 // ---------------------------------------------------------------------------
@@ -55,17 +61,13 @@ export type ToNetwork = { fetch: RequestValue; pos: number } | { abort: number }
  *  outstanding request `pos`, or that the connection for it failed. */
 export type ToProgram = { pos: number; response: ResponseValue } | { pos: number; error: string };
 
-/** One thing the host delivered (an input) or took (an output), in order. */
-export type LogEntry =
-  | { sent: RequestValue }
-  | { aborted: number }
-  | { got: ResponseValue; pos: number }
-  | { failed: string; pos: number }
-  | { fired: number }
-  | { advanced: number };
+/** One thing the host delivered (an input) or took (an output), in order.
+ *  `fired` names the timer by its id. */
+export type LogEntry = { sent: RequestValue } | { aborted: number } | { got: ResponseValue; pos: number } | { failed: string; pos: number } | { fired: number };
 
-/** A pending timer: how far it is from firing, and its period if it repeats. */
+/** A pending timer: its id, how far it is from firing, and its period if it repeats. */
 export interface TimerValue {
+  id: number;
   distance: number;
   interval?: number | undefined;
 }
@@ -76,18 +78,18 @@ export type Settled = { value: unknown } | { error: string };
 export interface ProgramValue {
   started: boolean;
   log: ValueList<LogEntry>;
-  /** Pending timers in the order they fire: by distance, then by registration. */
+  /** Pending timers in the order they fire: by distance, then by id, which is registration order. */
   timers: ValueList<TimerValue>;
   result?: Settled | undefined;
 }
 
-/** Start; fire the due timer at index `fire` of `timers`; move the clock by `advance`. */
+/** Start; fire the due timer with that id; move the clock by `advance`. */
 export type ProgramEvent = 'start' | { fire: number } | { advance: number };
 
 export interface ProgramOptions {
   /** The id of the network part `fetch` sends to. Default: `'net'`. */
   network?: string | undefined;
-  /** The seed of the host's random stream. Default: 1. */
+  /** The seed of the host's random stream, mixed with the part's id. Default: 1. */
   seed?: number | undefined;
 }
 
@@ -102,8 +104,7 @@ const describeEntry = (entry: LogEntry): string => {
   if ('aborted' in entry) return `abort its request ${entry.aborted}`;
   if ('got' in entry) return `get a ${entry.got.status} answer to request ${entry.pos}`;
   if ('failed' in entry) return `fail request ${entry.pos}`;
-  if ('fired' in entry) return `fire timer ${entry.fired}`;
-  return `advance ${entry.advanced} ms`;
+  return `fire timer ${entry.fired}`;
 };
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -126,7 +127,14 @@ function requestValue(input: string | URL | Request, init: RequestInit | undefin
   return value;
 }
 
-const toResponse = (value: ResponseValue): Response => new Response(value.body ?? null, { status: value.status, headers: value.headers });
+/** A `Response` from the value; one no `Response` can be is the server part's error. */
+function toResponse(value: ResponseValue): Response {
+  try {
+    return new Response(value.body ?? null, { status: value.status, headers: value.headers });
+  } catch (error) {
+    throw new SystemError(`an answer with status ${value.status}${value.body === undefined ? '' : ' and a body'} is not one a Response can be: ${errorText(error)}`);
+  }
+}
 
 /** A seeded random stream (mulberry32). */
 function mulberry32(seed: number): () => number {
@@ -139,6 +147,13 @@ function mulberry32(seed: number): () => number {
   };
 }
 
+/** The seed and the part's id as one seed (FNV-1a over the id), so that two parts draw differently. */
+function seedFor(seed: number, id: string): number {
+  let h = 0x811c9dc5 ^ (seed | 0);
+  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 0x01000193);
+  return h | 0;
+}
+
 /** A version-4 UUID from the stream. */
 function uuidFrom(random: () => number): string {
   const hex = Array.from({ length: 8 }, () => Math.floor(random() * 0x10000).toString(16).padStart(4, '0')).join('');
@@ -149,10 +164,13 @@ function uuidFrom(random: () => number): string {
 /** A delay as the host keeps it: whole milliseconds, none below zero. */
 const delayOf = (ms: number): number => (Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0);
 
+/** A promise for code that has left the model: it never settles, so nothing more happens. */
+const never = (): Promise<never> => new Promise(() => undefined);
+
 interface Pending {
   resolve(response: Response): void;
   reject(error: unknown): void;
-  /** Once settled: stops listening for an abort, and drops a timeout signal's timer. */
+  /** Once settled: stops listening for an abort, and lets go of a timeout signal's timer. */
   cleanup?: () => void;
 }
 
@@ -163,10 +181,17 @@ interface PendingTimer {
   interval: number | undefined;
 }
 
+/** The timer behind a `timeoutSignal`, and how many requests it guards. */
+interface Guard {
+  timer: number;
+  uses: number;
+}
+
 /** The code, running, and the host it runs against. */
 class Runtime {
   started = false;
   log = ValueList.empty<LogEntry>();
+  /** Pending timers, by distance then id. */
   timers: PendingTimer[] = [];
   result: Settled | undefined;
   /** The requests the code waits on, in the order it made them. */
@@ -177,11 +202,12 @@ class Runtime {
   replay: { log: readonly LogEntry[]; at: number } | undefined;
   /** How the code departed from the log on replay, recorded, not thrown. */
   divergence: string | undefined;
+  /** A host call the model cannot take, recorded, not thrown: raised when the step is snapshotted. */
+  fault: SystemError | undefined;
   readonly host: Host;
   private nextTimer = 1;
   private readonly random: () => number;
-  /** The timer behind each `timeoutSignal`, to drop with the request it guarded. */
-  private readonly guards = new WeakMap<AbortSignal, number>();
+  private readonly guards = new WeakMap<AbortSignal, Guard>();
 
   constructor(
     readonly id: string,
@@ -190,7 +216,7 @@ class Runtime {
     seed: number,
     private readonly onLate: (error: SystemError) => void,
   ) {
-    this.random = mulberry32(seed);
+    this.random = mulberry32(seedFor(seed, id));
     this.host = {
       fetch: (input, init) => this.fetch(input, init),
       setTimeout: (callback, ms) => this.add(callback, delayOf(ms), undefined),
@@ -200,7 +226,7 @@ class Runtime {
       timeoutSignal: (ms) => {
         const controller = new AbortController();
         const timer = this.add(() => controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError')), delayOf(ms), undefined);
-        this.guards.set(controller.signal, timer as unknown as number);
+        this.guards.set(controller.signal, { timer: timer as unknown as number, uses: 0 });
         return controller.signal;
       },
       random: () => this.random(),
@@ -226,72 +252,96 @@ class Runtime {
     );
   }
 
-  /** An output of the code: compared with the log on replay, logged and sent when live. */
-  private output(entry: LogEntry, send: (step: Step) => void): void {
+  /**
+   * An output of the code: compared with the log on replay, logged and
+   * sent when live. False when the code has left the model — a call after
+   * its step was over — which is recorded for the system and not thrown
+   * into the code, nor out of whatever called it.
+   */
+  private output(entry: LogEntry, send: (step: Step) => void): boolean {
     if (this.replay !== undefined) {
       const expected = this.replay.log[this.replay.at];
       if (expected === undefined || !deepEqual(expected, entry)) {
         this.divergence ??= `it tried to ${describeEntry(entry)}, ${expected === undefined ? 'past the end of its log' : `where the log has it ${describeEntry(expected)}`}`;
-        return;
+        return false;
       }
       this.replay.at++;
-      return;
+      return true;
     }
     if (this.step === undefined) {
-      const error = new SystemError(
-        `${this.id} called its host after its step was over: work left on the macrotask queue, a real timer above all, is not part of the model`,
+      this.onLate(
+        new SystemError(
+          `${this.id} called its host after its step was over: work left on the macrotask queue, a real timer above all, is not part of the model`,
+        ),
       );
-      this.onLate(error);
-      throw error;
+      return false;
     }
     this.log = this.log.pushed(entry);
     send(this.step);
+    return true;
   }
 
   /** An input to the code, from the log on replay or logged first when live. */
   input(entry: LogEntry): void {
     if ('got' in entry || 'failed' in entry) {
-      const [pending] = this.outstanding.splice(entry.pos, 1);
+      const pending = this.outstanding[entry.pos];
       if (pending === undefined) throw new SystemError(`${this.id} has no outstanding request ${entry.pos} to ${describeEntry(entry)}`);
+      const response = 'got' in entry ? toResponse(entry.got) : undefined;
+      this.outstanding.splice(entry.pos, 1);
       pending.cleanup?.();
-      if ('got' in entry) pending.resolve(toResponse(entry.got));
-      else pending.reject(new TypeError(entry.failed));
+      if (response !== undefined) pending.resolve(response);
+      else if ('failed' in entry) pending.reject(new TypeError(entry.failed));
     } else if ('fired' in entry) {
-      const timer = this.timers[entry.fired];
+      const i = this.timers.findIndex((timer) => timer.id === entry.fired);
+      const timer = this.timers[i];
       if (timer === undefined) throw new SystemError(`${this.id} has no timer ${entry.fired} to fire`);
-      this.timers.splice(entry.fired, 1);
+      this.timers.splice(i, 1);
       if (timer.interval !== undefined) this.insert({ ...timer, distance: timer.interval });
       timer.callback();
-    } else if ('advanced' in entry) {
-      for (const timer of this.timers) timer.distance = Math.max(0, timer.distance - entry.advanced);
     }
   }
 
+  /** The clock moves: every pending timer is that much nearer, and the due ones are at zero. */
+  advance(by: number): void {
+    for (const timer of this.timers) timer.distance = Math.max(0, timer.distance - by);
+  }
+
   private fetch(input: string | URL | Request, init: RequestInit | undefined): Promise<Response> {
+    let request: RequestValue;
     try {
-      const request = requestValue(input, init);
-      const signal = init?.signal ?? (input instanceof Request ? input.signal : null);
-      // A fetch with an aborted signal rejects with its reason, whatever that is, and sends nothing.
-      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-      if (signal?.aborted) return Promise.reject(signal.reason);
-      const pos = this.outstanding.length;
-      this.output({ sent: request }, (step) => step.send(this.network, { fetch: request, pos } satisfies ToNetwork));
-      return new Promise<Response>((resolve, reject) => {
-        const pending: Pending = { resolve, reject };
-        this.outstanding.push(pending);
-        if (signal !== null && signal !== undefined) {
-          const onAbort = () => this.abort(pending, signal.reason);
-          signal.addEventListener('abort', onAbort, { once: true });
-          pending.cleanup = () => {
-            signal.removeEventListener('abort', onAbort);
-            const guard = this.guards.get(signal);
-            if (guard !== undefined) this.clearId(guard);
-          };
-        }
-      });
+      request = requestValue(input, init);
     } catch (error) {
+      // Not a value: the model cannot take it. Recorded for the system; the
+      // code waits, as it would have for an answer.
+      if (error instanceof SystemError) {
+        this.fault ??= error;
+        return never();
+      }
       return Promise.reject(error instanceof Error ? error : new Error(String(error)));
     }
+    if ((request.method === 'GET' || request.method === 'HEAD') && request.body !== undefined) {
+      return Promise.reject(new TypeError(`Request with ${request.method}/HEAD method cannot have body`));
+    }
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : null);
+    // A fetch with an aborted signal rejects with its reason, whatever that is, and sends nothing.
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    const pos = this.outstanding.length;
+    if (!this.output({ sent: request }, (step) => step.send(this.network, { fetch: request, pos } satisfies ToNetwork))) return never();
+    return new Promise<Response>((resolve, reject) => {
+      const pending: Pending = { resolve, reject };
+      this.outstanding.push(pending);
+      if (signal !== null && signal !== undefined) {
+        const onAbort = () => this.abort(pending, signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+        const guard = this.guards.get(signal);
+        if (guard !== undefined) guard.uses++;
+        pending.cleanup = () => {
+          signal.removeEventListener('abort', onAbort);
+          if (guard !== undefined && --guard.uses === 0) this.clearId(guard.timer);
+        };
+      }
+    });
   }
 
   private abort(pending: Pending, reason: unknown): void {
@@ -325,10 +375,27 @@ class Runtime {
     if (i >= 0) this.timers.splice(i, 1);
   }
 
+  /** The timers as the value has them: the same ones, by id, at the value's distances, in order. */
+  reconcile(timers: readonly TimerValue[]): string | undefined {
+    const live = new Map(this.timers.map((timer) => [timer.id, timer]));
+    const next: PendingTimer[] = [];
+    for (const timer of timers) {
+      const pending = live.get(timer.id);
+      if (pending === undefined) return `it did not set timer ${timer.id}, which the value has`;
+      if (pending.interval !== timer.interval) return `it set timer ${timer.id} with another period than the value has`;
+      live.delete(timer.id);
+      next.push({ ...pending, distance: timer.distance });
+    }
+    for (const timer of live.values()) return `it set timer ${timer.id}, which the value does not have`;
+    this.timers = next.sort((a, b) => a.distance - b.distance || a.id - b.id);
+    return undefined;
+  }
+
   snapshot(): ProgramValue {
     this.step = undefined;
+    if (this.fault !== undefined) throw this.fault;
     const timers = ValueList.from(
-      this.timers.map((timer): TimerValue => (timer.interval === undefined ? { distance: timer.distance } : { distance: timer.distance, interval: timer.interval })),
+      this.timers.map((timer): TimerValue => (timer.interval === undefined ? { id: timer.id, distance: timer.distance } : { id: timer.id, distance: timer.distance, interval: timer.interval })),
     );
     return this.result === undefined ? { started: this.started, log: this.log, timers } : { started: this.started, log: this.log, timers, result: this.result };
   }
@@ -357,8 +424,8 @@ function describeProgram(value: ProgramValue): string {
 export function program(main: (host: Host) => unknown, options: ProgramOptions = {}): Kind<ProgramValue, ProgramRuntime, ProgramEvent> {
   const network = options.network ?? 'net';
   const seed = options.seed ?? 1;
-  // A host call after a step was over. Thrown where it was made, and from
-  // here at the part's next step.
+  // A host call after a step was over, recorded where it was made and
+  // raised by the system at its next step, through `fault`.
   let late: SystemError | null = null;
   const onLate = (error: SystemError) => {
     late ??= error;
@@ -373,7 +440,8 @@ export function program(main: (host: Host) => unknown, options: ProgramOptions =
     events(value) {
       if (!value.started) return [{ event: 'start', expected: true }];
       if (value.timers.length === 0) return [];
-      if (value.timers.get(0).distance === 0) return [{ event: { fire: 0 }, expected: true }];
+      const head = value.timers.get(0);
+      if (head.distance === 0) return [{ event: { fire: head.id }, expected: true }];
       const distances = new Set<number>();
       for (const timer of value.timers.toArray()) distances.add(timer.distance);
       return [...distances].map((distance) => ({ event: { advance: distance } }));
@@ -387,7 +455,7 @@ export function program(main: (host: Host) => unknown, options: ProgramOptions =
       runtime.replay = { log, at: 0 };
       runtime.start();
       await _drain();
-      while (runtime.divergence === undefined && runtime.replay.at < log.length) {
+      while (runtime.divergence === undefined && runtime.fault === undefined && runtime.replay.at < log.length) {
         const entry = log[runtime.replay.at]!;
         if ('sent' in entry || 'aborted' in entry) {
           runtime.divergence = `it did not ${describeEntry(entry)}, as the log has it`;
@@ -397,6 +465,8 @@ export function program(main: (host: Host) => unknown, options: ProgramOptions =
         runtime.input(entry);
         await _drain();
       }
+      if (runtime.fault !== undefined) throw runtime.fault;
+      runtime.divergence ??= runtime.reconcile(value.timers.toArray());
       if (runtime.divergence !== undefined) throw new SystemError(`${id} diverged on replay: ${runtime.divergence}. The code is not a function of its inputs`);
       runtime.replay = undefined;
       runtime.log = value.log;
@@ -413,11 +483,13 @@ export function program(main: (host: Host) => unknown, options: ProgramOptions =
       live.step = step;
       if (event === 'start') {
         live.start();
-        return;
+      } else if ('fire' in event) {
+        const entry: LogEntry = { fired: event.fire };
+        live.log = live.log.pushed(entry);
+        live.input(entry);
+      } else {
+        live.advance(event.advance);
       }
-      const entry: LogEntry = 'fire' in event ? { fired: event.fire } : { advanced: event.advance };
-      live.log = live.log.pushed(entry);
-      live.input(entry);
     },
 
     receive(runtime, from, message, step) {
@@ -426,11 +498,13 @@ export function program(main: (host: Host) => unknown, options: ProgramOptions =
       const live = runtimeOf(runtime);
       live.step = step;
       const entry: LogEntry = 'response' in message ? { got: message.response, pos: message.pos } : { failed: message.error, pos: message.pos };
-      live.log = live.log.pushed(entry);
       live.input(entry);
+      live.log = live.log.pushed(entry);
     },
 
     snapshot: (runtime) => runtimeOf(runtime).snapshot(),
+
+    fault: () => late ?? undefined,
 
     describeEvent: (event, _value, id) => (event === 'start' ? `${id} starts` : 'fire' in event ? `a timer of ${id} fires` : `${id} waits ${event.advance} ms`),
     describeValue: describeProgram,

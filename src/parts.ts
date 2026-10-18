@@ -150,17 +150,24 @@ function aborted(value: HttpValue, client: string, pos: number): HttpValue {
 
 /**
  * The network: every message in flight, oldest first, and the requests in
- * progress at each server. `routes` says which server a URL names, by
- * prefix. It expects to deliver the oldest message; its other events are
+ * progress at each server. `routes` says which server a URL names: the
+ * longest route the URL is under. It expects to deliver the oldest message; its other events are
  * the other deliveries, a lost message (`loss`), and a failed connection
  * (`failure`), which the client sees at once as a rejected fetch: before
  * delivery the server never saw the request, after it the server answered
  * and nobody heard.
  */
 export function http(routes: Readonly<Record<string, string>>): Kind<HttpValue, Cell<HttpValue>, HttpEvent> {
+  /** The server of the longest route the URL is under: the route itself, or it and a `/`, `?` or `#` after. */
   const serverFor = (url: string): string => {
-    for (const [base, server] of Object.entries(routes)) if (url.startsWith(base)) return server;
-    throw new SystemError(`http has no route for ${url}; its routes are ${Object.keys(routes).map((base) => JSON.stringify(base)).join(', ') || 'none'}`);
+    let found: [string, string] | undefined;
+    for (const route of Object.entries(routes)) {
+      const [base] = route;
+      const under = url === base || (url.startsWith(base) && (base.endsWith('/') || '/?#'.includes(url[base.length]!)));
+      if (under && (found === undefined || base.length > found[0].length)) found = route;
+    }
+    if (found === undefined) throw new SystemError(`http has no route for ${url}; its routes are ${Object.keys(routes).map((base) => JSON.stringify(base)).join(', ') || 'none'}`);
+    return found[1];
   };
   const what = (leg: Leg): string => {
     if (leg.kind === 'response') return `the ${leg.response.status} answer to ${leg.client}`;

@@ -563,16 +563,21 @@ to D45.
   their microtasks.
 - **The live runtime** of each part after its last step is kept by the
   system with the value it is at, and resumed when a later step finds the
-  part at that value; otherwise the kind rebuilds one. When a step resumed
-  anything and `rebuildCheck` is on (the default), the step is run again
-  with every part rebuilt from the pre-state values, and the two are
-  compared: a difference in a snapshot or in the messages sent means state
-  lived outside a value, and is a `SystemError`.
+  part at that value; otherwise the kind rebuilds one. A step that throws
+  forgets the live runtimes it touched, since one it changed before failing
+  is at no value. When a step resumed anything and `rebuildCheck` is on
+  (the default), the step is run again with every part rebuilt from the
+  pre-state values, and the two are compared: a difference in a snapshot
+  or in the messages sent means state lived outside a value, and is a
+  `SystemError`. `ingest` and `receive` are synchronous: one that returns a
+  promise is a `SystemError`, since the step would move on without it.
 - **A `SystemError` is the test's error**, never the system's failure, as
   a `DecisionsError` is: a message to a part that does not exist, code that
   departs from its log on replay, a host call outside a step, a rebuilt
-  part that differs, a value a kind gives that valsem cannot hold. A kind
-  throws it, or the step finds it; `applyEvent` then leads to one poison
+  part that differs, a value a kind gives that valsem cannot hold, `events`
+  that throw. A kind throws it, or the step finds it, or a kind recorded it
+  between steps and answers it from `fault()`, which the system asks of
+  every kind before each step; `applyEvent` then leads to one poison
   state, whose `getEvents` throws the error, so the search rejects (§5),
   and every later call on the model meets it. Any other throw from
   `ingest` or `receive` is the system's failure, and a violation.
@@ -585,38 +590,54 @@ to D45.
 - **A program part** (`program(main, options?)`) is real code behind a
   `Host`. Its value is `{ started, log, timers, result }`: the log of what
   the host delivered and took, in order, as a `ValueList` of entries —
-  `sent` and `aborted` are outputs, `got`, `failed`, `fired` and
-  `advanced` inputs; its pending timers as distances to fire, in the order
-  they fire; and what `main` settled with, a `Response` by its status,
-  nothing as `null`, a throw by its message. `restore` of a started value
-  runs `main` again with the log replayed: an input entry is fed to the
-  code and the queue drained, an output entry must be what the code does
-  next, compared by value. A difference is recorded by the host and
-  raised by `restore` once the drain is over, as a `SystemError`; it is
-  not thrown into the code, which may catch it. The rebuilt snapshot must
-  equal the value. The system resumes the live runtime where the value
-  matches. `fetch` turns the request into a value (a string body or none;
-  anything else is a `SystemError`), logs it, sends `{ fetch, pos }` to the
-  part `options.network` names (`'net'`), and returns a promise the
-  network settles by position: `{ pos, response }` resolves it with a
-  `Response` rebuilt from the value, `{ pos, error }` rejects it with a
-  `TypeError`. A signal aborts it: the request is removed, `aborted`
-  logged, `{ abort: pos }` sent. The part's events are `start` when not
-  started; `{ fire: 0 }`, expected, when a timer is due; else `{ advance:
-  δ }` for each distinct distance among its timers, never expected. An
-  advance subtracts; a timer that reaches zero is due. Timers are kept in
-  due order, registration order at equal dues (the HTML rule); an interval
-  comes back at its period when it fires; `timeoutSignal` is a timer that
-  aborts a signal, dropped once the request it guarded has settled, as
-  the platform's unreferenced timer would be. `random` and `uuid` are a
-  seeded stream (`options.seed`), the same on replay, so no draw is
-  logged. A host call outside a step, from a real timer above all, is a
-  `SystemError` thrown to the caller and raised again at the part's next
-  step.
+  `sent` and `aborted` are outputs, `got`, `failed` and `fired` inputs;
+  its pending timers, each with an id, a distance to fire and a period if
+  it repeats, in the order they fire; and what `main` settled with, a
+  `Response` by its status, nothing as `null`, a throw by its message.
+  `restore` of a started value runs `main` again with the log replayed:
+  an input entry is fed to the code and the queue drained, an output
+  entry must be what the code does next, compared by value; then the
+  timers the code set are matched to the value's by id and given its
+  distances, which is how an advance, which is not logged, is replayed. A
+  difference is recorded by the host and raised by `restore` once the
+  drain is over, as a `SystemError`; it is not thrown into the code,
+  which may catch it. The rebuilt snapshot must equal the value. The
+  system resumes the live runtime where the value matches. `fetch` turns
+  the request into a value (a string body or none), logs it, sends `{
+  fetch, pos }` to the part `options.network` names (`'net'`), and returns
+  a promise the network settles by position: `{ pos, response }` resolves
+  it with a `Response` rebuilt from the value, `{ pos, error }` rejects it
+  with a `TypeError`; an answer no `Response` can be, a status outside 200
+  to 599 or a body on a status that has none, is the server part's error.
+  A signal aborts it: the request is removed, `aborted` logged, `{ abort:
+  pos }` sent. A request the model cannot carry — a body that is not a
+  string — is recorded and raised when the step is snapshotted, and the
+  code waits on a promise that never settles, as it does after a host
+  call outside a step; neither is thrown into the code, which may catch
+  it, nor out of whatever called the host. A `GET` with a body is the
+  code's error, rejected as the platform rejects it. The part's events are
+  `start` when not started; `{ fire: id }`, expected, when the head timer
+  is due; else `{ advance: δ }` for each distinct distance among its
+  timers, never expected. An advance subtracts, and is not logged, so
+  histories that differ only in how time moved are one state; a timer
+  that reaches zero is due. Timers are kept by distance and then id,
+  which is due order and registration order at equal dues (the HTML
+  rule); an interval comes back at its period when it fires;
+  `timeoutSignal` is a timer that aborts a signal, dropped once every
+  request it guarded has settled, as the platform's unreferenced timer
+  would be (a signal of the code's own is never dropped). `random` and
+  `uuid` are a seeded stream, from `options.seed` and the part's id, the
+  same on replay, so no draw is logged. A host call outside a step, from
+  a real timer above all, is recorded on the kind and answered from
+  `fault()`, so the system raises it at its next step, whichever part's;
+  work the code hands to the platform finishes outside the step, and a
+  call from it that lands inside the step's own yield passes as the
+  code's, which the model cannot tell apart.
 - **The network** (`http(routes)`) is a value part: every message in
   flight, oldest first, as request legs and answer legs, and per server
-  the requests in progress there in delivery order. `routes` maps a URL
-  prefix to a server id. A request is named by its *position* among its
+  the requests in progress there in delivery order. `routes` maps a URL to
+  a server id: the longest route the URL is under, the route itself or it
+  and a `/`, `?` or `#` after. A request is named by its *position* among its
   client's outstanding requests, never by an id: the client sends it with
   the position, the network keeps it on the leg and on the in-progress
   entry, and when a request settles — its answer or failure delivered,
