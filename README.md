@@ -229,6 +229,123 @@ and remembered by the model, which rejects the next search of it. A body
 that throws before its first decision, or on the expected run, fails like
 any other, and a rejected promise is the body's failure.
 
+## Real code over a simulated network
+
+Code that talks over a network can be explored as it is, against a mock
+server, with the network between them simulated: every schedule of
+answers, failures, losses and timeouts, fewest faults first.
+
+```ts
+import { check, http, mock, program, system } from 'stifinder';
+import type { Host } from 'stifinder/host';
+
+// The code under test: fetch, and try again after an error answer, a failed
+// connection or a timeout, up to `retries` more times. It takes its host as
+// an argument and uses the host's fetch and timeout where it would use the
+// globals; in production the host is `webHost()`, the platform itself.
+async function fetchWithRetry(host: Host, url: string, retries: number): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await host.fetch(url, { signal: host.timeoutSignal(1000) });
+      if (response.ok || attempt === retries) return response;
+    } catch (error) {
+      if (attempt === retries) throw error;
+    }
+  }
+}
+
+it('gets an ok answer within as many faults as it retries, and the server counted', async () => {
+  const model = system(
+    {
+      client: program((host) => fetchWithRetry(host, 'https://counter.test/add', 3)),
+      net: http({ 'https://counter.test': 'server' }),
+      server: mock({ count: 0 }, (state) => [
+        { state: { count: state.count + 1 }, response: { status: 200 } },
+        { state, response: { status: 500 }, label: 'answers 500', cost: ['server-error'] },
+      ]),
+    },
+    {
+      ends: ({ client, server }) => {
+        expect(client.result).toEqual({ value: { status: 200 } });
+        expect(server.state.count).toBeGreaterThanOrEqual(1);
+      },
+    },
+  );
+  await check(model, { maxDeviations: 3 });
+});
+```
+
+A **system** is parts composed as one model. **`program(main)`** is real
+code behind a *host*: `main` runs for real, against a host whose `fetch`
+goes to the network and whose timers the search advances. **`http(routes)`**
+is the network: it says which server a URL names, and carries every message
+in flight, oldest first. **`mock(state, handle)`** is a server as a reducer:
+`handle` says how the oldest request is answered, in one way or several,
+the first expected and the rest the search's to explore, each with a label
+and cost keys. **`ends`** is what must hold wherever the system stops; a
+throw is the violation, so an assertion library's `expect` reads as it
+should (`invariant` is the same for every state).
+
+The expected run delivers every message at once, in order, and answers the
+first way. Everything else is a deviation: a message delivered out of
+order, lost (`loss`) or with its connection failed (`failure`), a server's
+other answer, a timer fired before the thing it was racing. Each is charged
+one deviation and its own keys, so `baseBudget: { loss: 0 }` explores a
+world that never loses a message, and `maxDeviations: 3` above is the
+claim: no schedule of up to three faults breaks the property. One fault
+more and the function gives up, and the search finds the cheapest way,
+which is not four refused connections but four answers the client did not
+wait for:
+
+```
+the client threw: The operation was aborted due to timeout
+4 deviations, 17 steps
+   4. client waits 1000 ms  (deviation)
+   8. client waits 1000 ms  (deviation)
+  12. client waits 1000 ms  (deviation)
+  16. client waits 1000 ms  (deviation)
+in state: client: threw The operation was aborted due to timeout; net: nothing in flight; server: {"count":4}
+```
+
+(With `report: { steps: 'charged' }`, as [`examples/fetch-with-retry.ts`](examples/fetch-with-retry.ts)
+asks; every step otherwise.) The server counted four times and the client
+has nothing: the retry is not idempotent, which a budget of
+`{ 'server-error': 0, failure: 0 }` says nothing about, and the search
+found on its own.
+
+**What a program part is.** Its state is the log of what the host delivered
+and took: the answers and failures of its requests, its timers firing, its
+clock moving, the requests it sent. The search explores by value, and runs
+`main` again with the log replayed wherever it needs the code at a state it
+is not at. Two requirements follow, the same two as for a body that
+decides. The code must be a function of its inputs: one that draws
+`Math.random()`, reads the clock, or keeps state in a module between runs
+departs from its log on replay, and that is a **`SystemError`**, the test's
+error, never a violation; the host's `random()` and `uuid()` are a seeded
+stream for that reason. And a step is complete on the microtask queue: a
+real timer set by the code fires after the step, outside the model, and a
+host call from it is a `SystemError` too. A timer the code needs is the
+host's, which the search advances as an event. Time is local to each part
+and relative, so a wait reads `client waits 1000 ms`, and costs nothing
+when nothing else can happen. A `SystemError` is also a message to a part
+that does not exist, and a rebuilt part that differs from the live one,
+which the search checks whenever it resumes one.
+
+**Parts of your own.** A part is a `Kind`: the value it starts from, the
+events its value allows (of the value alone, so that a system of a thousand
+parts asks a state for its events without running one), a runtime for a
+value, what an event does, what a message from a peer does, and the value
+back. A part reaches a peer by id, `step.send(to, message)`, and the system
+delivers after the sender's microtasks have drained. **`valuePart(kind)`**
+is a part whose runtime is its value, a reducer: `http` and `mock` are two.
+A part the test did not name comes to exist when a message first reaches
+it, if the system's `kindOf` knows its kind. How it all works is
+[DESIGN.md §9.4](DESIGN.md#94-systems-of-parts).
+
+**Where the host lives.** `stifinder/host` exports `Host`, `Timer` and
+`webHost()` and imports nothing, so production code that takes a host
+carries none of the search.
+
 ## Reading a result
 
 A search that finds nothing has cleared a budget, not the model, unless it
@@ -375,6 +492,21 @@ six.
   `ViolationError`; **`runOnce(bodyOrModel, decisions, options?)`** runs
   the body once with those, or with a violation's, and 0 for every decision
   after, under the model's `maxDecisions` given the model, or the option's.
+- **`system(parts, options?)`** is parts composed as a
+  `Model<SystemState, SystemEvent>`; see [Real code over a simulated
+  network](#real-code-over-a-simulated-network). `parts` are the kinds by
+  id, in part order; `options` are `kindOf(id)`, the kind of a part that
+  comes to exist on first delivery, `invariant` and `ends`, over the parts'
+  values by id, `rebuildCheck` (default `true`), and `report`.
+  **`partsOf(state)`** gives a state's values by id. **`program(main,
+  options?)`** is real code behind a host, with `network` (default `'net'`),
+  the part its `fetch` sends to, and `seed`, of its random stream.
+  **`http(routes)`** is the network, routing a URL to a server by prefix;
+  its cost keys are `loss` and `failure`. **`mock(state, handle)`** is a
+  server as a reducer. **`valuePart(kind)`** makes a `Kind` of a part
+  written as a reducer. A **`SystemError`** is the test's error, which the
+  search rejects with. `stifinder/host` is the `Host` interface and
+  `webHost()`, for production code.
 - **`formatViolation(violation, model?, options?)`** renders a violation as
   text: the error, what the path cost, each step with what it was charged
   besides the step itself, and the state that failed a check. It uses the

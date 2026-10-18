@@ -36,8 +36,7 @@
 // part of the run, or of the model. A decision such work makes is thrown
 // to it, and remembered for the next search; the search it was late for
 // is over by then, and is not told. A timer is modelled, as a decision of
-// a double today and through a host in the proposal of DECISIONS.md, not
-// set.
+// a double, or through the host of a program part (system.ts), not set.
 // ---------------------------------------------------------------------------
 
 import { HashMap, ValueList } from 'valsem';

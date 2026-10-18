@@ -798,7 +798,7 @@ search would be told "at its next step", with a kept cache that holds
 everything as the one exception, and the external review of 0.2.0
 (2026-10-03) read that as a false proof. It is not one the search can
 close: a timer is not a thing a body sets but a thing it models, as a
-decision of a double today and through a host in the proposal under Open,
+decision of a double, or through the host of a program part (D45),
 and a body that sets one has left the model, as one that reads a clock has
 (D1). What the search can say is the rule, and it does, in the README and
 DESIGN.md §9.3, in place of a claim that was not true. **Rejected:** a
@@ -873,7 +873,256 @@ dependency. The test entry takes a model, a cache or a body, so the root
 would import the harness anyway. **Rejected:** a `stifinder/testing`
 subpath, by analogy with `kilde/testing`. kilde's root is a production
 library and its testing helpers need an optional peer, which the subpath
-keeps out of production imports. Neither holds here.
+keeps out of production imports. Neither holds here. **Revised** by D45:
+one entry point for the search, and `stifinder/host` beside it for the one
+thing production code takes from stifinder, the host interface.
+
+## Systems of parts
+
+Settled in the design discussions of 2026-10-03 to 2026-10-18 and built on
+2026-10-18 (0.3.0), from the Durable Object simulator and a test of real
+code over HTTP. What remains of the proposal — the seed, the turn,
+`reachable`, and the deferred — is under Open. DESIGN.md §9.4.
+
+### D38. A part is a kind: a value for the cache, a runtime for the code, and events of the value alone
+
+A part is an independent owner of state that evolves by its own events,
+and the simulator sees every part through one interface, its `Kind`:
+`initial(id)`, `events(value)`, `restore(id, value)`, `ingest(runtime,
+event, step)`, `receive(runtime, from, message, step)`, `snapshot(runtime)`.
+Its state is split into a value for the cache, which must be a valsem
+value, and a runtime for the code, which is the kind's own. `events` is a
+function of the value alone, never of a runtime. A value is a state the
+platform itself restarts from and every input since: `initial` and the
+whole history for a value part or a client; for a Durable Object, storage
+and alarm and the inputs since it came into memory, which is where it may
+fold (Open).
+
+**Why.** A system of a thousand parts must ask a state for its events
+without instantiating one of them, and a step must touch the few parts
+with something to do; both need the events in the value. A value that
+carries every input since a restart is what lets a runtime be rebuilt
+from it alone, with nothing of another part. The split is the product
+of two users: the Durable Object simulator has many objects, each with
+storage, alarms and a history of its own, and a client against a server
+is the same shape with two. Parts that share nothing but messages have
+logs that diverge, and that is what lets the product merge: two histories
+in which the server did things in another order, but the client received
+the same answers in the same order, are one state. I/O automata (Lynch
+and Tuttle) are the precedent. **Rejected:** a simulator that knew about
+hosts, networks and clocks. Everything it would have known reduced to
+rules the parts obey, and the rest is each part's business, so a
+Cloudflare simulator brings its own parts (stubs, input gates, storage)
+and the simulator does not change; D27 holds. **Rejected:** a single body
+between doubles, which never merges, because it sees everything and its
+log is the whole history. **Cost.** The third leg of a restore's
+independence the framework cannot supply: the code's behaviour must be a
+function of its inputs, which replay and the rebuild check (D40, D41)
+detect rather than enforce.
+
+### D39. A system is a registry of parts by string id, with an active set and a touched set
+
+A system is made from the parts a test names, in the order named, and
+`kindOf(id)`, the kind of a part that comes to exist when a message first
+reaches its id, with `initial(id)` as its value; no part is removed. Ids
+are strings, so part order is the order named and then id order. The
+state keeps the active set, the ids whose value has any event, and a step
+snapshots the parts it touched, the owner and every receiver; every other
+value is kept.
+
+**Why.** Parts are dynamic — a Durable Object can create another — and
+expensive to instantiate, so the set of parts is state, a runtime exists
+only where an event is ingested or a message lands, and asking a state for
+its events walks the few parts with something to do, not the namespace.
+**Rejected:** creation order as part order. It would do for a reader but
+not for merging: two histories that created the same parts in another
+order would be two states with equal snapshots. **Rejected:** a single
+request as a part: it has no runtime, no event but its delivery, and its
+state is a position in someone's queue. The grain is the independent
+owner. **Rejected:** `active` derived at every state by asking every part,
+which is the walk over the namespace the set exists to avoid. **Deferred:**
+a part id that is not a string, which wants a structural total order over
+values; see Open. From the Durable Object simulator, 2026-10-18.
+
+### D40. Parts talk by message through the step; the system keeps the live runtimes and checks a rebuild
+
+Nothing crosses a part boundary but a message: `ingest` or `receive` calls
+`step.send(to, message)`, and the system delivers it after the sender's
+microtasks have drained, into the receiver's `receive`, the receiver
+restored first and drained after, until nothing is left. Restores are
+sequential, in the order sent. The system keeps the live runtime of each
+part after its step, with the value it is at, and resumes it when a later
+step finds the part at that value; a kind's `restore` always rebuilds.
+When a step resumed anything, it is run again with every part rebuilt from
+the values, and a difference in a snapshot or in the messages sent is a
+`SystemError` (`rebuildCheck`, on by default).
+
+**Why.** Restoring a program part is asynchronous, since a replay drains
+the microtask queue between the entries it feeds, so a receiver cannot be
+restored inside a synchronous call from its sender. With messages the
+system restores each receiver as it delivers, and two things come free: a
+replay has no step and so cannot send, which the first form had as a rule;
+and every message that crosses a boundary passes through the system,
+which is the trace D29's recorder was for. The live cache is the system's
+and not the kind's so that the system knows when it resumed, which is
+when the rebuild check has anything to compare; and so that a kind is
+simpler to write. Two replays at once would interleave their microtasks,
+and a divergence would show nondeterministically. **Rejected** (held for a
+day, 2026-10-18): a typed call on a peer's runtime, reached by id through
+the step, with the step restoring the peer on the way. The sender would
+have had to declare what it reaches so the system could restore that
+first, a declaration that can be wrong. **Rejected:** a kind that caches
+its own live runtime, the proposal's first form. **Cost.** No call across
+a boundary returns a value, which none of them did: a send, a delivery and
+an answer are each one way. A step that resumed is run twice while the
+check is on; under breadth-first search few steps resume.
+
+### D41. A program part's value is its log, replay is its restore, and a divergence is the test's error
+
+A program part is real code behind a host (D45). Its value is the log of
+what the host delivered and took, in order — the answers and failures of
+its requests, its timers firing, its clock moving, the requests it sent
+and gave up on — with its pending timers and what `main` settled with.
+`restore` runs `main` again with the log replayed: inputs fed back,
+outputs compared with the log. A difference is recorded by the host and
+raised once the drain is over, as a `SystemError`; so is a host call after
+the step was over, raised at the part's next step; and the search rejects
+with a `SystemError`, as with a `DecisionsError` (D37), through one poison
+state whose `getEvents` throws it. Requests and answers are values at the
+boundary, and the host rebuilds `Request` and `Response` on its side.
+
+**Why.** The log is the one thing a restart cannot reconstruct, and
+everything else follows from it. A difference on replay means the code is
+not a function of its inputs — `Math.random()`, a clock read, module
+state that survives — and that is the test's error, not the system's
+failure, so it must reject the search and not become a violation path.
+**Rejected:** throwing the difference into the code. Retry code catches
+everything and carries on, and only the final "settled differently" check
+caught a random URL, in the prototype. **Rejected:** a live `Response`
+passed across, which would couple two runtimes; and a replay that re-sent
+its requests, which would double what the network holds, and with
+messages cannot. **Rejected:** reporting the failure of `main` as a
+violation on its own. What `main` settled with is in the value, and the
+test's `ends` says whether it is right; a client that gave up is a result
+to assert, not an error of the search. **Cost.** Under breadth-first
+search a program part is replayed on nearly every step, since the search
+asks about states the live runtime is not at; cheap at the sizes tried
+(a few hundred states in tens of milliseconds), and the remedy is under
+Open.
+
+### D42. Time is local, relative and never read; a timeout signal's timer goes with its request
+
+Each program part keeps its timers as distances to fire, in due order and
+registration order at equal dues (the HTML rule); an advance subtracts
+and what reaches zero is due. The part expects to fire the head of its due
+queue; its other events are one advance per distinct distance among its
+timers, never expected, so time proceeds only when nothing else can
+happen, and one advance past several wake-ups is one event and one
+deviation. The clock is never read. `random` and `uuid` are a seeded
+stream, the same on replay. A `timeoutSignal`'s timer is dropped once the
+request it guarded has settled.
+
+**Why.** No absolute time in the state, so a part whose tick changes
+nothing returns to the same state, the space of a periodic system can be
+finite, and a search over it can be exhaustive. A delivery is instant on
+the baseline and a timeout fires only as a deviation, except after a loss,
+when nothing is expected and the first advance is free: a lost message and
+its timeout cost one deviation together. A long stall is one fault in the
+world, so one advance past several wake-ups is one deviation where
+advancing one at a time is as many; the states the two ways reach merge.
+`AbortSignal.timeout`'s timer is one the platform does not wait for, and
+once its request has settled it could only abort a signal nobody listens
+to; kept, it padded every trace with timers firing to nobody.
+**Rejected:** absolute time in the state, which grows without bound and
+makes every tick a new state. **Rejected:** orderings alone, with no
+distances: placing a newly set timer among a part's pending ones needs
+their distances, or the model explores schedules no runtime produces
+(Alur and Dill's regions are the general form; relative integers are the
+practical stopping point). **Rejected:** a nominal latency per delivery, a
+made-up number with which the baseline needed an "early" beside its
+"late"; and processing that takes time, since any step may be arbitrarily
+late already. **Rejected:** logging the random draws, which a seeded
+stream makes a function of the history. **Deferred:** one aligned clock
+advancing every part together, clock reads, and the turn; see Open.
+**Cost.** A signal of the code's own, used for two requests in turn, loses
+its timer when the first settles; an unusual use, noted in DESIGN.md.
+
+### D43. One network part names requests by position, and its faults are silence and a failed connection
+
+The network is one part, owning every message in flight oldest first and
+the correlation between the endpoints' outstanding requests. A request is
+named by its position among its client's outstanding requests, never by
+an id; the network keeps per client that list in send order and per
+server the requests in progress there in delivery order, and shifts the
+positions above one that settles in the step that settles it. It expects
+to deliver the oldest message; the other deliveries are reorderings; its
+faults are a lost message, which is silence, and a failed connection,
+which the client sees at once as a rejected fetch — before delivery the
+server never saw the request, after it the server answered and nobody
+heard. A request the client gave up on is an orphan: delivered like any
+other, never failed, its answer going nowhere.
+
+**Why.** Oldest first is what a network does when latencies are equal; two
+clients that start together interleave on the baseline because they do.
+Position is the identity with nothing in it but the present: a counter is
+derivable from a program part's log and costs nothing while the log
+stands, but in a value part, and in any part after a fold, it is a number
+that climbs with the history, and two states that differ in nothing but
+how many requests came before do not merge. The network sees every send,
+delivery, answer and abort, so it alone can keep the mapping, and no shift
+touches a part the step did not. **Rejected** (held for a day,
+2026-10-18): a channel per pair of endpoints. It was argued from the cost
+of asking a state for its events, but the events are the deliveries and
+losses of the messages in flight, not links, and channels walk the same
+messages; what one network has that channels lack is correlation, where
+channels would have had to partition each endpoint's list per peer; and
+oldest-first across channels was part order, where in one network it is
+physics. **Rejected:** ids from per-part counters, the first draft's form;
+endpoints holding references to each other's positions, since a shift on
+one side would then rewrite the other in a step that never touched it;
+newest-first delivery, the first prototype's default, which let each party
+run undisturbed. **Rejected:** an orphan's delivery as a fault of its own:
+it arrives as any message does, and what differs is that nobody listens.
+**Cost.** The network is touched on every step that moves a message, and
+snapshotted each time; with persistent collections that is an update
+proportional to what moved. Two networks in one system, HTTP and Durable
+Object stubs, are two parts, each owning the positions of its own
+interactions (Open).
+
+### D44. A mock holds its pending requests, and its alternatives are its own events
+
+A mock is a reducer: its value is the reducer's state and the requests
+delivered and not yet answered, in delivery order, with who to answer.
+Its events are the outcomes `handle(state, request)` returns for the
+oldest pending request, the first expected, each with a label and cost
+keys.
+
+**Why.** The alternatives are the mock's events and not the delivery's,
+because the delivery is the network's event and the network's `events`
+may read only the network's value (D38); so a request costs a step to
+deliver and a step to answer, and no deviation on the expected path.
+Faults ride on carriers: a server-side 500 is an alternative of the
+answer, a lost answer an alternative of its delivery, and a fault offered
+alone keeps a state from being an end (D7). Found by the retrying-counter
+example, 2026-10-18, where "one delivery event per alternative" could not
+be written.
+
+### D45. The host is `stifinder/host`, with no import
+
+Production code takes a `Host` as an argument — `fetch`, the timers,
+`timeoutSignal`, `random` with `uuid` — and `webHost()` is the platform
+itself. Both live in `stifinder/host`, which imports nothing; the root
+exports them too, for tests. Every member is a function property, so that
+code may take the ones it uses apart.
+
+**Why.** A client that makes an idempotency key with `crypto.randomUUID()`
+diverges on replay, and a retry that waits needs a timer, so the host is
+how real code gets a platform the search controls, and it must be
+importable by production code at no cost. **Rejected:** the root only,
+which would put a testing library in production bundles' dependency lists;
+a separate package, a release of its own for forty lines. **Rejected:**
+methods on the interface, which lint flags when destructured. **Deferred:**
+clock reads, a key not being a time (Open). Revises D30.
 
 ## Non-goals
 
@@ -884,8 +1133,8 @@ tied violations is reported (D11).
 ## Open
 
 **Decided, not built.** The recorder argument (D29), for hand-written
-models and value parts; a program part's host records for it (the
-proposal).
+models and value parts; a program part's log is its trace (D41), and the
+system sees every message (D40).
 
 **Proposed, not decided.** The surface sketched in the discussion of D27;
 every name is provisional.
@@ -898,37 +1147,36 @@ every name is provisional.
   proposal's `reachable` is its first use.
 - A scheduler over `Decisions` for bodies with several tasks, which picks
   the task to run next and settles between picks. The two that exist have
-  no user but a self-test (D27). Subsumed by the proposal's parts, except
-  for a body whose doubles decide synchronously, which the first delivery
-  leaves on `decisionModel` (see Deferred there).
+  no user but a self-test (D27). Subsumed by systems of parts (D38), except
+  for a body whose doubles decide synchronously, which stays on
+  `decisionModel` (see Deferred below).
 - `decide.note(text)` on `Decisions`, the body's way to the recorder
   (D29), shown by the report of a failing run.
 - Merging the states of a body by a fingerprint of the world at a decision,
   where a body can give one, so that a state reached by two decision
   sequences is explored once (D36). Nothing needs it at kilde's sizes.
-  Superseded by the proposal's checkpoints, which fold a part only where
-  the system itself restarts from the folded value.
-- `settle()`: resolves once the microtask queue has drained. Subsumed by the
-  proposal: a step of a system ends when the microtask queue is empty,
-  which the simulator waits for, and a body under `decisionModel` is
-  complete on the microtask queue by rule (D37).
+  Superseded by checkpoints, which fold a part only where the system
+  itself restarts from the folded value (Deferred below).
+- `settle()`: resolves once the microtask queue has drained. Subsumed: a
+  step of a system ends when nothing is left to deliver and the microtask
+  queue is empty, which the system waits for (D40), and a body under
+  `decisionModel` is complete on the microtask queue by rule (D37).
 - An `optional` mark on an event, so that `terminalInvariant` also runs
   where every event is optional, if a fault offered alone should be
   supported (D7).
 - A deviation charge the model sets per event: the index, for delay
   bounding without the encoding; zero, for a model with no baseline (D3);
   and a key of its own for a reordering — another expected event taken
-  first — which the proposal's expected events make concrete: with one key,
+  first — which a system's expected events make concrete (D38): with one key,
   a budget can say "any schedule, no faults" (the fault keys at 0) but not
   "faults on the plain schedule alone", and whether a bug needs the
   reordering or only the fault is a real question.
 - A deepening policy over steps and deviations together, and a result that
   reports the violations that trade one for the other (D33, D10).
-- A composition of parts over a simulated network, with a host for the
-  code under test: the proposal below. It subsumes the scheduler over
-  `Decisions`, `settle()` and `findPath`, and replaces merging by a
-  fingerprint with checkpoints that fold a part only where the system
-  itself restarts from the folded value.
+- What remains of the composition of parts over a simulated network: the
+  seed, the turn and `reachable`, the proposal below. The parts, the
+  program part and its host, the network and the mock are built (D38 to
+  D45).
 
 **Undecided, the maintainer's call.** Whether `test (valsem floor)` becomes
 a required check (D26).
@@ -938,201 +1186,15 @@ index-0 event is affordable (D3); why the model's own cost keys are
 compared by their sum (D10). D3's case for the flat charge was argued on
 2026-09-30, not recorded when it was built: confirm it or replace it.
 
-### Proposal: composable systems over a simulated network
+### Proposal: what remains of composable systems over a simulated network
 
-From the design discussion of 2026-10-03 and 04. Nothing here is built, and
-every name is provisional. It is a plan for a first delivery, with the
-reasons, what was rejected on the way, and what is deferred and what would
-bring it in.
+From the design discussions of 2026-10-03 to 2026-10-18. The model of
+parts, the program part and its host, the network and the mock are built
+(D38 to D45; DESIGN.md §9.4). This is what remains, with the reasons, what
+was rejected on the way, and what is deferred and what would bring it in.
+Every name is provisional.
 
-#### What it is for
-
-Testing real code against doubles, with the search exploring what the
-doubles decide: a client over a network against a server mock; later
-several clients, real servers, Durable Objects. `decisionModel` does this
-for one body whose doubles call `Decisions` directly (D36, D37). What it
-cannot do is compose: two pieces of real code each with a history of its
-own, a network between them with faults of its own, and states that merge
-when the pieces cannot tell two histories apart.
-
-#### The model
-
-**A part** is an independent owner of state that evolves by its own
-events, and the simulator sees every part through one interface, defined
-per *kind*. `initial(id)` is the value a part of the kind starts from.
-`events(value)` lists what the part can do next, each a value with a
-label, cost keys, and whether the part *expects* it — the sunny-day event,
-of which a part may name none or several. `restore(value)` gives a runtime
-for a value: the cached runtime if its value matches, else one rebuilt.
-`ingest(runtime, event, step)` does one of the events, and
-`receive(runtime, from, message, step)` takes a message from a peer, both
-reaching other parts through `step`. `snapshot(runtime)` gives the value
-back. `describeEvent` and `describeState` are as for a `Model`. A part is a
-`Model` with its state split into a value for the cache and a runtime for
-the code — and `events` is a function of the value alone, never of the
-runtime, which is what lets a system of a thousand parts ask a state for
-its events without instantiating one of them. It holds for every part
-named here: a host's due queue and pending distances are in its value,
-the network's messages in flight and its correlation lists are its value,
-a Durable Object's due alarm and queued deliveries are in its value, and a
-mock's pending requests are its value. A part's value is a state the
-platform itself restarts from, and every input since: for a value part
-and a client, `initial` and the whole history; for a Durable Object,
-storage and alarm and the inputs since it came into memory, which is the
-fold under Why. That is what lets a restore depend on nothing but the
-value, and the independence has a third leg the framework cannot supply:
-the code's behaviour must be a function of its inputs, which the replay
-comparison and the rebuild check detect rather than enforce.
-
-The runtime is the kind's own, and the simulator reaches it only through
-the kind. Parts talk by message: `ingest` or `receive` sends to a peer by
-id, `step.send(to, message)`, and the system delivers after the sender's
-microtasks have drained, into the peer's `receive`, restoring the peer
-first and draining again, until nothing is left to deliver. So the
-touched set of a step is its owner and every receiver; no part keeps
-another's runtime, which is rebuilt on demand; and a replay, which has no
-step, cannot send. The messages a kind accepts are its interface to its
-peers: what a host sends to the network, what the network delivers to a
-host or a mock. Restores are sequential, in the order sent, never
-concurrent: two replays at once would interleave their microtasks, and a
-divergence would show nondeterministically. Why messages and not calls is
-under Why.
-
-What is a part, and what is smaller: a single request is not one — it has
-no runtime, no event but its delivery, and its state is a position in
-someone's queue. The grain is the independent owner: a client, a server, a
-Durable Object, and the *network* they talk over, one part owning every
-message in flight, its deliveries (oldest first, by physics), its losses,
-and the correlation between the endpoints' outstanding requests (below).
-Why one network and not a channel per link is under Why. Two networks in
-one system — HTTP, and Durable Object stubs — are two parts, each owning
-the correlation of its own interactions.
-
-**A system** of parts is a `Model`, made from a *registry*: the kinds, and
-`kindOf(id)`, which kind an id belongs to. Its state is a `ValueMap` from
-part id to snapshot, and so the set of parts is state: a part comes to
-exist when a message is first delivered to its id, with `initial(id)` as
-its value, and no part is ever removed — a Durable Object's runtime goes
-away at eviction, its value does not. Ids are strings: Durable Object ids
-are, the network's is the name the test gives it, and a string order is a
-part order that no history can disturb (below). Beside the snapshots the
-state keeps the *active* set, the ids whose value has any event, so that
-asking a state for its events is a walk over the few parts with something
-to do, not over every idle object in the namespace.
-
-Its `getEvents` begins with the *candidates*: the events the active parts
-expect, in part order and each part's own order; where no part expects
-anything, each active part's first event. One candidate is free, at index
-0 — the first, or with a `seed` the one the hash of the state picks
-(below) — then the other candidates, then every other event in part order
-and the part's own order. Part order is declaration order for the parts a
-test names, then id order for the parts that came to exist; creation order
-would do as well for a reader but not for merging, since two histories
-that created the same parts in another order would be two states with
-equal snapshots. Its `applyEvent` restores the event's owner through the
-registry, calls `ingest`, waits for the microtask queue to drain, then
-delivers what was sent, each message into its receiver's `receive` with
-the receiver restored first and a drain after, until nothing is left —
-the runtime of a part exists only once an event is ingested into it or a
-message reaches it — and snapshots the parts the step *touched*: the
-owner and every receiver. Every other part's value is a value already,
-and is kept; the active set is updated from the same touched set.
-The search core is unchanged, and merging is valsem equality on the
-product.
-
-The simulator knows five things, none about time and none about what parts
-say to each other: a step ends when nothing is left to deliver and the
-microtask queue is empty;
-`restore` touches nothing but its own part; a part's events are a function
-of its value; events are values naming things in a snapshot; the
-candidates come first, the free one before the others, and part order
-breaks the ties that remain. Within a part, order is
-physics — a host's due queue runs in the HTML order, a stub's messages are
-FIFO, a network of equal latencies delivers oldest first — and a part lists
-its events in that order; across parts, order is a choice, and the
-candidates are exactly where it is made.
-
-**Three kinds of part** in the first delivery:
-
-- `program(main)`: real code behind a *host*, the adapter it takes its
-  platform from: `fetch`, `setTimeout`, `clearTimeout`, `setInterval`,
-  `clearInterval`, `timeoutSignal`, and `random` with a `uuid` on it. Its
-  value is the log of inputs the host delivered (responses, errors, timer
-  firings, the random draws) as a `ValueList`, its
-  pending timers as distances to fire, and its queue of due macrotasks.
-  `restore` resumes the live runtime when its log matches, else runs `main`
-  again with the log replayed: inputs fed back, outputs suppressed and
-  compared with the recording, a difference being the test's error, as a
-  body whose decisions change is today (D37). The host records the
-  difference and `restore` raises it once the drain is over; it does not
-  throw it into the code, which may catch it — retry code catches
-  everything — and settle as if nothing had happened. It expects the head
-  of its due queue; its other events are `advance(δ)`, one per distinct
-  distance among its pending timers — its own clock, local and relative,
-  folded into the host — and never expected, since time proceeds only when
-  nothing else can happen. One `advance` past several wake-ups is one
-  event, and so one deviation, where advancing one wake-up at a time is as
-  many: a long stall is one fault in the world. The states the two ways
-  reach merge.
-- `mock(reducer)`: a value part. Its value is the reducer's state and its
-  pending requests, in delivery order. Its events are the outcomes
-  `handle(state, request)` returns for the oldest pending request — one, or
-  several alternatives each with a label and cost keys, the first expected
-  — and taking one removes the request and sends the response into the
-  network. A mock with nothing pending has no events. The alternatives are
-  the mock's events and not the delivery's, because the delivery is the
-  network's event and the network's `events` may read only the network's
-  value; so a request costs a step to deliver and a step to answer, and no
-  deviation on the expected path.
-- `http(routes)`: a value part, the network between the clients and the
-  servers; `routes` says which server a URL names. Its value is the
-  messages in flight, request legs and response legs, as serialised values
-  each naming the position it is about, the correlation lists (below), and
-  the orphans of aborted requests. It expects the delivery of the oldest
-  message in flight, an orphan like any other: what differs about an
-  orphan is that nobody listens for its answer. Its other events are the
-  other deliveries, and its faults: a lost message, which is silence, and
-  what a client makes of silence is its timer's business; and a failed
-  connection, which the client sees at once as a rejected fetch — before
-  delivery the server never saw the request, after it the server answered
-  and nobody heard. Delivering a request appends it to the receiver's
-  pending requests, a mock's in its value, a server host's in its runtime;
-  delivering a response is the client host's resolution of the promise at
-  that position, inside the step.
-
-**A request is named by its position**, never by an id. The network keeps,
-per client, that client's outstanding requests in the order sent, and, per
-server, the requests in progress there in the order delivered; the client
-host keeps the first list as its unresolved promises, a server host the
-second as its handlers in flight, and a call across the boundary says
-which index it is about. A send appends to the client's list. A response
-delivered to the client resolves index *p* and removes it, and the network
-shifts every index above *p* in its legs and lists in the same step. A
-server's response from index *j* removes it from both in-progress lists
-alike. An abort removes index *p* on the client, and the network keeps
-what it still holds of that request as an *orphan* — a request leg still
-in flight, which may yet reach the server and change its state, or an
-in-progress entry whose response is to be discarded — and drops a
-response leg. A lost message changes no list: the promise stays
-outstanding, which is what a lost message is, until the client aborts it.
-Every change to an endpoint's list is a send, a delivery, a response or an
-abort on the network, so the network sees each of them and holds the only
-mapping between the two sides, and no shift ever touches a part the step
-did not. Why positions and not ids is under Why.
-
-**The expected schedule**, stated once. The candidates of a state are the
-heads of the hosts' due queues, the oldest delivery in flight, and the
-oldest request pending at a mock; the free one is the first in part order,
-or the seed's pick. When nothing is due, nothing is in flight and nothing
-is pending, no part expects anything, and the nearest `advance` of every
-waiting host is a candidate: time proceeds for one host, the first in part
-order or the seed's pick, and the others wait until nothing is due, in
-flight or pending again, when every waiting host's advance is a candidate
-once more. Every other pick is one deviation plus its keys: a reordering —
-another candidate taken first — a delivery after a timer that was due, a
-stall past any number of wake-ups, a fault. A reordering and a fault are
-charged alike today; a key of their own for reorderings is under Open, and
-the report tells them apart whichever way that goes.
+#### `seed`
 
 **`seed`**, an option of the iterative search. Given one, the free
 candidate of a state is `deepHash(state, hasher) mod k` into the candidate
@@ -1144,315 +1206,104 @@ candidate is the first, and a report reads as today. The report of a
 seeded search re-counts the found path's deviations against the plain
 order, so its number keeps its meaning though it is not the minimum;
 `exhaustive` is untouched, being a statement about the space, which no seed
-changes. Why a seeded mode, and what it needs of the cache, is under Why.
+changes.
 
-**Rules the parts obey.** Nothing crosses a part boundary but a message,
-sent through the step and delivered by the system after the sender's
-drain; a replay, having no step, cannot send, register or cancel.
-Requests and responses are values at the boundary, and the host rebuilds
-`Request` and `Response` objects on its side. A request is named by its
-position, above, and nothing in a value counts the history. Nothing
-decides synchronously: a part with a choice offers it as events. The
-first holds by construction; none of the rest can be enforced in
-JavaScript; the detector is to rebuild every part from its value at a
-sample of states, re-apply the step, and compare the product snapshot with
-the live one. A difference means state lived outside the snapshots.
-
-The drain after the owner's `ingest`, and after each delivery, is a
-yield to the macrotask queue
-(`setImmediate`, taken with the real timer as it was when stifinder loaded,
-since a test that fakes timers fakes that one too). It is not the yield
-D37 refused. That one would have let a body's own timers fire so the
-search could catch what they decided — an accommodation of a body outside
-the model. This one defines where a step ends, for parts that have no
-timers of their own: their time is the host's, and nothing of theirs is on
-the macrotask queue to fire.
-
-For a program part the host sees every input it delivers and every output
-it takes, so its log is the trace, and the system sees every message
-between parts, so a reported path can show them without any part's help:
-`explain` on a reported path is the replay with the log and the messages
-printed. D29's recorder argument stays for hand-written models and for
-value parts, whose `ingest` receives it on `step`.
-
-**Properties.** `invariant` and `terminalInvariant` over the product value,
-as today; a state is terminal when no part has an event, and a steady
-state is not an end. Instead, `reachable(cache, isGood)`: over the explored
-transitions, mark the states `isGood` accepts, propagate backwards, and
-report the shortest path to an explored state from which none is
-reachable within the budget explored; a proof only when the result is
-exhaustive. This is `findPath` above, with its first use.
-
-#### Why
-
-**Parts, not a scheduler.** The scheduler over `Decisions` proposed above
-would still be one body. Both users want more: the Durable Object
-simulator has many objects, each with storage, alarms and a history of its
-own, and a client against a server is the same shape with two. Parts that
-share nothing but messages have logs that diverge, and that is what lets
-the product merge: two histories in which the server did things in a
-different order, but the client received the same responses in the same
-order, are one state. A single body between doubles never merges, because
-it sees everything and its log is the whole history; the product is for
-systems of several subjects. I/O automata (Lynch and Tuttle) are the
-precedent: a channel is an automaton like the processes at its ends, and a
-system is their composition.
-
-**One interface, and a simulator ignorant of interactions.** The
-alternative was a simulator that knew about hosts, networks and clocks.
-Everything it would have known reduced to the five rules above; the rest
-is each part's business, so a Cloudflare simulator brings its own parts
-(stubs, input gates, storage) and the simulator does not change. D27
-holds: the generic parts belong here, the platform's semantics stay with
-it.
-
-**One network, not a channel per link.** The grain of a part is the
-independent owner, and the network is one. **Rejected:** a channel per
-pair of endpoints that talk, the FIFO from one to the other, held for a
-day (2026-10-18). It was argued from the cost of asking a state for its
-events: one network's would walk every link. But the events are the
-deliveries and losses of the messages in flight, so the walk is over
-messages, not links, an idle link is nothing to walk, and channels walk
-the same messages split across parts. What a single network has that
-channels lack is correlation: it sees every send, delivery and abort of
-every endpoint, so a request can be named by its position among that
-endpoint's outstanding, where channels would have had to partition each
-endpoint's list per peer and keep the pieces in step. And oldest-first is
-then the network's own order, physics within a part, where across
-channels it was part order and the candidates. The price is that the
-network is touched on every step that moves a message, and snapshotted
-each time; with a persistent value and a hasher that remembers (valsem
-D68) that is an update proportional to what the step moved, not to what
-the network holds, and the validation says so.
-
-**A request is named by its position.** The alternative was ids from
-per-part counters, the first draft's form. A counter is derivable from a
-program part's log and costs nothing while the log stands; in a value
-part, and in any part after a fold, it is a number in the state that
-climbs with the history, and two states that differ in nothing but how
-many requests came before do not merge. Position among the outstanding is
-the identity with nothing in it but the present, at the price of the
-shifts, which the network does in the step that moves them and nowhere
-else. **Rejected:** letting the endpoints hold references to each other's
-positions. A client-side shift would then have to rewrite the server's
-value in a step that never touched the server.
-
-**Messages, not calls.** The first form had a part call a typed method on
-a peer's runtime, reached by id through the step, with the step restoring
-the peer on the way. **Rejected** (2026-10-18, by the prototype, next
-paragraph): restoring a program part is asynchronous, since a replay
-drains the microtask queue between the entries it feeds, so a receiver
-cannot be restored inside a synchronous call from its sender; the sender
-would have had to declare what it reaches so the system could restore
-that first, a declaration that can be wrong. With messages the system
-restores each receiver as it delivers. Two things come free: a replay has
-no step and so cannot send, where the first form had it as a rule; and
-every message that crosses a boundary passes through the system, which is
-the trace D29's recorder was for. The cost is that no call across a
-boundary returns a value, which none of them did: a send, a delivery and
-an answer are each one way.
-
-**The prototype.** `system`, `program`, `mock` and `http` were written on
-2026-10-18 as far as a test of a retrying fetch needs them, the test
-being a mock server as a reducer at a base URL, the code behind a host,
-and what must hold wherever the system stops. It is where the messages,
-the recorded divergence and the two network faults above come from.
-Within as many faults as the function retries it returns ok and the
-server has counted; at one more it gives up, with the trace; code that
-draws a random number is caught at its first replay. Replay ran on nearly
-every step under breadth-first search, as predicted, at 392 states in
-32 ms for four faults, so the remedy under Deferred is not yet needed.
-
-**The zero-delay expected schedule.** A delivery is instant on the
-baseline, and a timeout fires only as a deviation. **Rejected:** a nominal
-latency per delivery, the first form. It is a made-up number, and with it
-the baseline needed an "early" beside its "late". With none, the only
-times in a run are the ones the code sets itself. **Rejected:**
-newest-first delivery, the first prototype's default, which let each party
-run undisturbed. Oldest first is what a network does when latencies are
-equal; two clients that start together interleave on the baseline because
-they do, and a lost update between them is a zero-deviation failure,
-honestly. **Rejected:** processing that takes time. Any step may be
-arbitrarily late in the model already, so "instant" and "later than
-everything concurrent" are the two legs, and both are explored.
-
-**Time is local, relative, and never read.** Each host keeps its own timers
-as distances to fire; an advance subtracts, and hands over what reaches
-zero to the host's queue. Within a host that is the HTML timer rule: due
-order, registration order at equal dues (NodeRacer's rule for timers,
-Endo et al., ICST 2020). No absolute time exists in the state, so a value
-part whose tick changes nothing returns to the same state, the space of a
-periodic system can be finite, and a search over it can be exhaustive.
-**Rejected:** absolute time in the state, which grows without bound and
-makes every tick a new state. **Rejected:** orderings alone, with no
-distances: placing a newly set timer among a host's pending ones needs
-their distances, or the model explores schedules no runtime produces
-(Alur and Dill's regions are the general form; relative integers are the
-practical stopping point for delays computed at run time). **Rejected for
-the first delivery:** one aligned clock advancing every host together,
-nearest wake-up first. It gives the baseline the code's durations imply,
-at the price of a state per relative phase of the hosts' clocks, bounded
-by the lcm of the periods, and it undoes the collapse of a tick to a
-self-loop. With local clocks the price moves: when two parts both progress
-on periodic timers, the one later in part order costs a deviation per tick
-under the seedless pick. The ladder from there: every waiting host's
-advance is a candidate, so a seed spreads the tax across the states a run
-passes through; a seed cannot alternate in a fixpoint, since the hash of a
-state that a round returns to picks the same host every round, and that is
-the periodic case; the *turn* — the host whose wait is advanced next, kept
-in the system's state and rotating among the hosts that wait, nothing while
-one host is active and ×N states at most — gives alternation there,
-deterministic and readable, at 1:1; aligned advance gives the real ratio
-between periods at the deferred price of a state per phase, and stays as
-the policy for the case the turn cannot serve. The two-client counter is
-the validation that says how far up the ladder the first delivery must
-go. **Rejected as the baseline:** a hash of the state to break ties among
+**Why a seeded mode.** The state space, the transitions and the merging
+are the same under every seed; a seed changes only which edge out of each
+state is free. So with deviations unbounded a seed reorders the finding
+and nothing else, and under a bounded budget it chooses the neighbourhood:
+*d* deviations around baseline *s*, and *k* seeds are *k* neighbourhoods —
+swarm verification (Holzmann). It finds a different kind of bug. Distance
+from the plain schedule and PCT's depth (how many ordering constraints a
+bug needs) are different measures: a bug of depth one can lie ten
+deviations from the plain baseline, if B has to progress nine ticks to
+reach it, and a random baseline satisfies one constraint with probability
+about a half while B's progress costs it nothing. The plain search finds
+what is near normal; the swarm finds what is shallow in constraints and far
+from normal. The plain baseline stays the default, since it is what makes
+a report readable, and a seeded search is for a space `exhaustive` is out
+of reach for: exhausted, every seed finds the same space. **What it
+needs.** The cache split in two: what the model said — the event sets, the
+`applyEvent` results, the invariants, which for a program part are the
+replays and so all the cost — is seed-free and shared; what a search
+labelled — the order of events, the cost vectors, the pending buckets — is
+per seed. Today both live in one `StateSpaceCache`, and this is the reason
+to separate them. For three parts or fewer, enumerating the part orders is
+a better swarm than random seeds: complete over the one dimension that
+matters, each run's baseline with a name. **Rejected:** hashing a
+projection of the state rather than the whole, for stability under
+unrelated changes; in a seeded mode the seed is arbitrary already, and
+whole-state variation is what gives alternation when the state changes.
+**Rejected as the baseline:** a hash of the state to break ties among
 waits. It varies only where the state already varies, so in a fixpoint it
 is pinned, exactly where fairness is wanted; and it makes the expected
 schedule shift with every unrelated change to the code, and with the hash
 seed of the process, so the uncharged steps of a report are ones no reader
-can fill in. **Adopted as a mode:** the same hash under a key the test
-supplies, `seed`, with a deterministic hasher — see the next paragraph.
-Clock reads are left out of the first delivery entirely: a read
-puts an absolute number into the reader's log, and an abstract `Instant`
-that avoids the number must know which instants the code still holds,
-which a program part cannot know without checkpoints or declared
-constants.
+can fill in. The same hash under a key the test supplies, with a
+deterministic hasher, is the mode above.
 
-**Seeds, for the space that cannot be exhausted.** The state space, the
-transitions and the merging are the same under every seed; a seed changes
-only which edge out of each state is free. So with deviations unbounded a
-seed reorders the finding and nothing else, and under a bounded budget it
-chooses the neighbourhood: *d* deviations around baseline *s*, and *k*
-seeds are *k* neighbourhoods — swarm verification (Holzmann). It finds a
-different kind of bug. Distance from the plain schedule and PCT's depth
-(how many ordering constraints a bug needs) are different measures: a bug
-of depth one can lie ten deviations from the plain baseline, if B has to
-progress nine ticks to reach it, and a random baseline satisfies one
-constraint with probability about a half while B's progress costs it
-nothing. The plain search finds what is near normal; the swarm finds what
-is shallow in constraints and far from normal. The plain baseline stays
-the default, since it is what makes a report readable, and a seeded search
-is for a space `exhaustive` is out of reach for: exhausted, every seed
-finds the same space. **What it needs.** The cache split in two: what the
-model said — the event sets, the `applyEvent` results, the invariants,
-which for a program part are the replays and so all the cost — is
-seed-free and shared; what a search labelled — the order of events, the
-cost vectors, the pending buckets — is per seed. Today both live in one
-`StateSpaceCache`, and this is the reason to separate them. For three
-parts or fewer, enumerating the part orders is a better swarm than random
-seeds: complete over the one dimension that matters, each run's baseline
-with a name. **Rejected:** hashing a projection of the state rather than
-the whole, for stability under unrelated changes; in a seeded mode the
-seed is arbitrary already, and whole-state variation is what gives
-alternation when the state changes.
+#### The turn
 
-**Faults ride on carriers.** A lost response is an alternative to its
-delivery; a server-side 500 is an alternative of the mock's answer to the
-request.
-A fault offered alone keeps a state from being an end (D7), and once
-nothing nominates an expected event, each part's first event is a
-candidate, whichever part it belongs to.
+With local clocks (D42), when two parts both progress on periodic timers,
+the one later in part order costs a deviation per tick under the seedless
+pick. The ladder from there: every waiting part's advance is a candidate,
+so a seed spreads the tax across the states a run passes through; a seed
+cannot alternate in a fixpoint, since the hash of a state that a round
+returns to picks the same part every round, and that is the periodic case;
+the *turn* — the part whose wait is advanced next, kept in the system's
+state and rotating among the parts that wait, nothing while one part is
+active and ×N states at most — gives alternation there, deterministic and
+readable, at 1:1; aligned advance gives the real ratio between periods at
+the deferred price of a state per phase, and stays as the policy for the
+case the turn cannot serve. The two-client counter is the validation that
+says how far up the ladder to go. **Rejected for the first delivery:** one
+aligned clock advancing every part together, nearest wake-up first. It
+gives the baseline the code's durations imply, at the price of a state per
+relative phase of the parts' clocks, bounded by the lcm of the periods, and
+it undoes the collapse of a tick to a self-loop.
 
-**All decisions are steps.** A decision made inside a drain cannot wait for
-the search. Here every choice is an event of a part, so the harvest of D36
-is not needed; a synchronous `decide` inside a program part is deferred,
-with speculative execution of the expected step as the way to add it. That
-fixes who the first delivery is for: the Durable Object simulator, the
-remote counter and the outbox, whose choices are messages and timers.
-kilde's sinks and sources decide synchronously, through `integer`, and
-stay on `decisionModel` until that arrives.
+#### `reachable`
 
-**Values at the boundary, replay isolated, and a rebuild check.** A live
-`Response` passed across would couple two runtimes; a replay that re-sent
-its requests would double what the network already holds, and with
-messages it cannot, having no step. The rebuild
-check needs no knowledge of interfaces, and catches nondeterminism, module
-state that survives a replay, and most hidden channels between parts.
-
-**Steady states are not terminal.** The maintainer's call. A
-positive-outcome query asks what a steady state would have raised, whether
-the system got where it should, without declaring any state an end.
-
-**Eviction is an event, and the fold.** A Durable Object's value is its
-storage, its pending alarm, and the log of inputs since it last came into
-memory; `restore` constructs it from storage and replays that log. The
-storage alone would not do: an object mid-RPC holds its continuation in
-memory, not in storage, and a restore from storage would drop it on the
-baseline, where the live runtime must resume. Eviction is an event of the
-part — a fault, charged like one — after which the log is empty and the
-value is storage and alarm alone; that is where the proposal's checkpoint
-rule says a part may fold, and here it is physically honest, since the
-platform loses the in-memory state at exactly that point. Histories that
-evict converge, and the log stays short because eviction is where it
-resets. The three observations behind this paragraph, the grain and the
-dynamic and lazy parts of the model — parts are dynamic, parts are
-expensive to instantiate, and the grain of a part is a question — came
-from the Durable Object simulator, 2026-10-18; the network as one part,
-and positions, from working the client, network and server through on the
-same day.
-
-#### Validation
-
-A differential oracle: systems of value parts only, against a hand-written
-product `Model`, fuzzed as `oracle.test.ts` does. A second, for `program()`:
-a value part wrapped as a program part — its reducer run behind a host,
-requests in and responses out — must explore the same product as the value
-part does, up to the log; that is what exercises replay, suppression and
-the rebuild check against a known answer, which the first oracle never
-reaches. `examples/remote-counter`
-redone with its real clients over `mock` and `http`, with the same three
-outcomes at the same costs. The transactional outbox: the real relay
-against its explicit model, the duplicate at one timeout and one retry,
-clean after the idempotency fix within the same budgets. The two-client
-counter under the seedless pick, the seed, and the turn, for the deviation
-at which the lost update appears under each. Runs and time under
-breadth-first exploration before any change of exploration order: a
-program part is replayed whenever the search asks about a state its live
-runtime is not at, and breadth-first by steps asks around (the remedy is
-under Deferred). A system of many idle parts and few active ones: the cost
-of a state's events and of a step must follow the active and the touched
-sets, not the namespace, and the network's snapshot must cost what the
-step moved, not what the network holds.
-
-#### Delivery
-
-1. The `Host` interface and `webHost()`, for production code that takes its
-   host as an argument: `fetch`, the timers, `timeoutSignal`, and `random`
-   with a `uuid` on it, since a client that makes an idempotency key with
-   `crypto.randomUUID()` diverges on replay and the outbox example is about
-   that key; clock reads stay deferred, a key not being a time. Where it
-   lives is open: a dependency-free subpath, `stifinder/host`, which
-   revises D30 (stifinder is no longer a testing tool throughout) and puts
-   a testing library in production bundles' dependency lists, or a separate
-   small package. Its shape — timer ids as values, requests and responses
-   as values — is dictated by `program()`, so it is delivered with step 3,
-   not before it.
-2. `system()` with value parts only: the registry and dynamic parts, the
-   active set, the candidates and the free one, the merge rule, the
-   touched-set step, the network with its positions, the differential
-   oracle.
-3. `program()` and the host: the log, resume or replay, suppression and
-   comparison with the divergence recorded, the rebuild check, the second
-   oracle.
-4. `http()` faults, abort and orphans; `mock` alternatives.
-5. `seed`, with the cache split and the re-counted report; the turn, if the
-   two-client counter says so.
-6. `reachable()`.
-7. Examples, a README section, DESIGN.md §9.4, and decisions D38 onward
-   cut from this entry.
+`invariant` and `ends` are over the product's values, as built; a state is
+terminal when no part has an event, and a steady state is not an end.
+Instead, `reachable(cache, isGood)`: over the explored transitions, mark
+the states `isGood` accepts, propagate backwards, and report the shortest
+path to an explored state from which none is reachable within the budget
+explored; a proof only when the result is exhaustive. This is `findPath`
+above, with its first use. **Steady states are not terminal**, the
+maintainer's call: a positive-outcome query asks what a steady state would
+have raised, whether the system got where it should, without declaring
+any state an end.
 
 #### Deferred, each with what would bring it in
 
 - Aligned clocks: two parts progressing on periodic timers whose relative
-  phase is the behaviour under test.
-- `Instant` and clock reads: code that reads time. Instants incomparable
-  across hosts unless the test declares a relation; relative offsets for
-  the instants a part holds; declared constants to cap them.
+  phase is the behaviour under test. The turn above comes first.
+- `Instant` and clock reads: code that reads time. A read puts an absolute
+  number into the reader's log, and an abstract `Instant` that avoids the
+  number must know which instants the code still holds, which a program
+  part cannot know without checkpoints or declared constants. Instants
+  incomparable across parts unless the test declares a relation; relative
+  offsets for the instants a part holds; declared constants to cap them.
 - Checkpoints for program parts: histories that grow without bound, or
   crashes to model. A part folds to a value only where the system itself
   restarts from that value, or asserts it and a fold check verifies the
-  assertion. For a Durable Object the fold is eviction, decided above.
+  assertion. For a Durable Object the fold is eviction: an object's value
+  is its storage, its pending alarm, and the log of inputs since it last
+  came into memory, and `restore` constructs it from storage and replays
+  that log. The storage alone would not do: an object mid-RPC holds its
+  continuation in memory, not in storage, and a restore from storage would
+  drop it on the baseline, where the live runtime must resume. Eviction is
+  an event of the part — a fault, charged like one — after which the log is
+  empty and the value is storage and alarm alone; that is where the fold is
+  physically honest, since the platform loses the in-memory state at
+  exactly that point. Histories that evict converge, and the log stays
+  short because eviction is where it resets. What a crash does to work in
+  flight is an effect of the event, not of the restore: the object's pending
+  requests die, and the network learns in that step that its in-progress
+  entries there will never be answered, told to the callers as the
+  connection failure `http` has. Decided 2026-10-18, from the Durable
+  Object simulator.
 - The `optional` mark above: faults that should not prevent an end.
 - Durable Object networks: a second network part for the stubs, FIFO per
   pair with one shared break, owning the positions of its own interactions
@@ -1471,7 +1322,38 @@ step moved, not what the network holds.
 - Exploration order within a deviation level: depth-first along the live
   runtime, replaying only at branch points, the product's analogue of
   D36's harvest. D23 leaves the order within a level free; what is reported
-  does not change.
+  does not change. Not needed at the sizes tried (D41).
+- Synchronous decisions in program parts. A decision made inside a drain
+  cannot wait for the search. In a system every choice is an event of a
+  part, so the harvest of D36 is not needed; a synchronous `decide` inside
+  a program part is deferred, with speculative execution of the expected
+  step as the way to add it. That fixes who systems are for first: the
+  Durable Object simulator, the remote counter and the outbox, whose
+  choices are messages and timers. kilde's sinks and sources decide
+  synchronously, through `integer`, and stay on `decisionModel` until that
+  arrives; it is what brings them over.
 - Streaming bodies; real servers as program parts, which need no new
-  machinery; symmetry reduction; a horizon; synchronous decisions in
-  program parts, which is what brings kilde's sinks and sources over.
+  machinery; symmetry reduction; a horizon.
+
+#### Validation
+
+Done, as the oracles of DESIGN.md §10: systems of value parts against a
+hand-written product, and a value part against the same client as real
+code. Remaining: `examples/remote-counter` redone with its real clients
+over `mock` and `http`, with the same three outcomes at the same costs. The
+transactional outbox: the real relay against its explicit model, the
+duplicate at one timeout and one retry, clean after the idempotency fix
+within the same budgets. The two-client counter under the seedless pick,
+the seed, and the turn, for the deviation at which the lost update appears
+under each. A system of many idle parts and few active ones: the cost of a
+state's events and of a step must follow the active and the touched sets,
+not the namespace, and the network's snapshot must cost what the step
+moved, not what the network holds.
+
+#### Delivery
+
+1. `seed`, with the cache split and the re-counted report; the turn, if the
+   two-client counter says so.
+2. `reachable()`.
+3. The remote counter and the outbox as examples, and decisions D46 onward
+   cut from this entry.
