@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.3.0](https://github.com/andershessellund/stifinder/compare/v0.2.0...v0.3.0) (2026-10-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* the valsem peer range is `>=0.2.0 <0.3`; a project on valsem 0.1 upgrades valsem with stifinder. stifinder's own API is unchanged.
+
+### Features
+
+* `runOnce` takes the model as well as the body, and runs it under the `maxDecisions` the model was built with; a `DecisionModel` shows its `body` and `maxDecisions` ([2c6229f](https://github.com/andershessellund/stifinder/commit/2c6229f66517079b4d54e0dd39b4183f3808690d))
+* `ViolationError` and `IncompleteError` carry the result of the search as `space`, so a test that reports what a search did has it when the search failed too ([819222a](https://github.com/andershessellund/stifinder/commit/819222a2ff90987c3e8e1fe0f77b8809a3686b31))
+* http() is the network with requests named by position, losses, failed connections, reorderings and orphans; mock() is a server as a reducer whose alternatives are its own events ([d31c385](https://github.com/andershessellund/stifinder/commit/d31c3855e5c69c245dfb955795028ebdef2f3c48))
+* program() runs real code behind a Host the search controls: its log replayed by restore, a divergence or a late host call a SystemError that rejects the search, time local and relative, randomness a seeded stream ([d31c385](https://github.com/andershessellund/stifinder/commit/d31c3855e5c69c245dfb955795028ebdef2f3c48))
+* stifinder runs on valsem 0.2, and the peer range is &gt;=0.2.0 &lt;0.3 ([60251d7](https://github.com/andershessellund/stifinder/commit/60251d7369f35b69224f921b2115a91b17a0cc2c))
+* stifinder/host is the Host interface and webHost() for production code, with no import ([d31c385](https://github.com/andershessellund/stifinder/commit/d31c3855e5c69c245dfb955795028ebdef2f3c48))
+* system() composes parts as one model: a Kind with a value for the cache and a runtime for the code, parts that talk by message through the step, live runtimes resumed and rebuild-checked, parts that come to exist on first delivery ([d31c385](https://github.com/andershessellund/stifinder/commit/d31c3855e5c69c245dfb955795028ebdef2f3c48))
+
+
+### Bug Fixes
+
+* a single choose alternative that lists a cost is a step that charges it; a run is complete on the microtask queue, and a timer is modelled, not set ([#28](https://github.com/andershessellund/stifinder/issues/28)) ([1f7c0fc](https://github.com/andershessellund/stifinder/commit/1f7c0fc2d201c4ea1a82671b91b59c35b20a8c52))
+* an option given as `undefined` is one left out, in its type as well as at runtime: a wrapper can pass its optional options through under `exactOptionalPropertyTypes` ([819222a](https://github.com/andershessellund/stifinder/commit/819222a2ff90987c3e8e1fe0f77b8809a3686b31))
+* the "in state" line of a long run reads a run of equal picks as one, `0 ×6999`, instead of listing every pick ([2c6229f](https://github.com/andershessellund/stifinder/commit/2c6229f66517079b4d54e0dd39b4183f3808690d))
+
 ## [0.2.0](https://github.com/andershessellund/stifinder/compare/v0.1.0...v0.2.0) (2026-10-03)
 
 
