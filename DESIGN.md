@@ -436,7 +436,9 @@ and cost keys of its own, `integer(range, label?)` which number below
 `range`. The first pick is the expected one; any other is a deviation, and
 charges the cost keys of its alternative (the first alternative's are
 charged on the expected run). A range of 1, or a single alternative, is no
-decision.
+decision, unless the alternative lists a cost: then it is a step that
+charges it, which a budget that allows none of that key keeps the run
+from.
 
 - **A state is the decisions made so far**, a valsem `ValueList` of picks,
   so that one decision more is a push and hashing a state is O(1) however
@@ -479,21 +481,24 @@ decision.
   the search calls right after, throws it: the one callback whose throw
   the search does not take for an error of the model (§5), so `check`
   rejects with it, at once, and the next search meets it again.
-- **A run is over once the body has returned or its promise has settled**,
-  and the body is called through an async function so that a throw takes
-  the same tick as a return. A decision after that, from work the body
-  left running, is thrown to that work, and remembered by the model, which
-  throws it at the next state any search asks the model about: the search
-  cannot be told at the moment, but is told at its next step, or at the
-  first step of the next search that asks anything (a kept cache that
-  already holds everything asks nothing, and is not told). Work the body
-  does not await must therefore not decide. That a microtask the body
-  queues still runs before the run is over, and counts as a decision of
-  the run, is an accident of where the `await` falls, not a promise.
-- **Labels** are how a pick reads: an alternative's own, or `maybe`'s and
-  `integer`'s label for a pick that is not 0 (a function is given the
-  pick; words get the pick added above two alternatives), and the pick
-  itself otherwise.
+- **A run is complete on the microtask queue.** It is over once the body
+  has returned or its promise has settled, and the body is called through
+  an async function so that a throw takes the same tick as a return.
+  Nothing the body hands to the macrotask queue is part of the run, or of
+  the model: a timer is not set by a body but modelled, as a decision of a
+  double (and through a host, in the proposal under Open in DECISIONS.md).
+  A decision made from such work, once the run is over, is thrown to that
+  work, and remembered by the model, which throws it at the next state a
+  search asks about. That is the next search's: a search is one chain of
+  microtasks, so it is over before any timer fires, whatever its size, and
+  the search a decision was late for is not told. That a microtask the
+  body queues still runs before the run is over, and counts as a decision
+  of the run, is an accident of where the `await` falls, not a promise.
+- **Labels** are how a pick reads: an alternative's own, or `alternative
+  k` without one; `maybe`'s and `integer`'s label for a pick that is not 0
+  (a function is given the pick; words get the pick added above two
+  alternatives), `label: no` for the pick 0 of a labelled decision, and
+  `picked k of n` for an unlabelled one.
 - **The model's `report`** asks for the charged steps alone (§9.2).
 
 `runOnce(body, decisions)` runs the body once with those decisions

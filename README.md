@@ -209,14 +209,18 @@ deciding is not cut off by anything.
 
 Two requirements. The body must make the same decisions given the same
 answers, since it is run again for every prefix; one whose decisions change
-between runs is rejected. And work the body leaves running, unawaited, must
-not decide: once the body has returned, or its promise has settled, no run
-could replay a decision. Either, or a wrong use of `Decisions`, is a
-**`DecisionsError`**, never a violation: the search rejects with it,
-whatever the body does with it, and it says which run's decisions it
-happened at. A decision made late is thrown to the work that made it, and
-remembered by the model, which rejects the next state a search asks it
-about (a kept cache that already holds everything asks nothing). A body
+between runs is rejected. And a run is complete on the microtask queue:
+once the body has returned, or its promise has settled, the run is over,
+and nothing the body handed to the macrotask queue is part of it, or of
+the model. A timer is not something a body sets; it is something it
+models, as a decision of a double that asks whether the timer fires
+before the thing it was racing. Either requirement broken, or a wrong use
+of `Decisions`, is a **`DecisionsError`**, never a violation: the search
+rejects with it, whatever the body does with it, and it says which run's
+decisions it happened at. One thing it cannot do is reject the search a
+late decision was late for: the search runs in microtasks and is over
+before a timer fires, so the error is thrown to the work that decided,
+and remembered by the model, which rejects the next search of it. A body
 that throws before its first decision, or on the expected run, fails like
 any other, and a rejected promise is the body's failure.
 
