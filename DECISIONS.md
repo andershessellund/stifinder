@@ -547,7 +547,7 @@ models per property; more on request (`FUZZ_RUNS`). DESIGN.md §10.
 
 ### D26. valsem is a peer dependency, its range one minor wide, and CI tests its floor (#18, #26)
 
-The peer range is `>=0.1.0 <0.2`. A CI job installs the lowest version the
+The peer range is `>=0.2.0 <0.3`. A CI job installs the lowest version the
 range admits, read from `package.json`, and runs the typecheck and the
 tests against it.
 
@@ -557,7 +557,12 @@ and not tested is a guess. Before 1.0, valsem releases a breaking change as
 a new minor: 0.1.0 renamed the edits stifinder makes (`set`, `delete` and
 `push` on a value are `with`, `deleted` and `pushed`), and none of 0.0.x
 has the new names. So the floor moved to 0.1.0, and the range ends before
-the next minor, which may break stifinder in the same way. **Rejected:**
+the next minor, which may break stifinder in the same way. 0.2.0 did not:
+it changed the protocol a value class implements (`[hash](hasher)`), which
+stifinder has none of, and made a second copy of valsem a separate library
+whose values are refused, which is what the peer range exists to prevent;
+the floor moved to 0.2.0 with nothing else to change but a comment, and the
+range ends before 0.3 as before. **Rejected:**
 `<1`, the range until #26: it admitted every later minor of valsem
 untested. **Cost.** Each valsem minor needs a stifinder release that widens
 the range, and raising the floor is a breaking change (CONTRIBUTING.md).
