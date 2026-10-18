@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.1](https://github.com/andershessellund/stifinder/compare/v0.3.0...v0.3.1) (2026-10-18)
+
+
+### Bug Fixes
+
+* a restore keeps the value's order of timers, so a correct program with timers due together is no longer a SystemError ([bd024f6](https://github.com/andershessellund/stifinder/commit/bd024f615da3e6eb5a1a11a1dd4f5561948bc190))
+* a timeout signal's deadline holds across every request it is passed to: its timer is unreferenced, as the platform's is, and time moves to it while any request is in flight ([bd024f6](https://github.com/andershessellund/stifinder/commit/bd024f615da3e6eb5a1a11a1dd4f5561948bc190))
+* a timer that is due may fire late, after time moves, as one deviation ([bd024f6](https://github.com/andershessellund/stifinder/commit/bd024f615da3e6eb5a1a11a1dd4f5561948bc190))
+* an interval is re-armed after its callback, as Node and HTML do, so a timer the callback sets for the period fires first ([bd024f6](https://github.com/andershessellund/stifinder/commit/bd024f615da3e6eb5a1a11a1dd4f5561948bc190))
+* two searches of one system at once no longer share a live runtime, which gave a false proof with rebuildCheck off ([bd024f6](https://github.com/andershessellund/stifinder/commit/bd024f615da3e6eb5a1a11a1dd4f5561948bc190))
+
 ## [0.3.0](https://github.com/andershessellund/stifinder/compare/v0.2.0...v0.3.0) (2026-10-18)
 
 
