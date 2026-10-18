@@ -964,9 +964,10 @@ per *kind*. `initial(id)` is the value a part of the kind starts from.
 label, cost keys, and whether the part *expects* it — the sunny-day event,
 of which a part may name none or several. `restore(value)` gives a runtime
 for a value: the cached runtime if its value matches, else one rebuilt.
-`ingest(runtime, event, step)` does one of the events, reaching other
-parts through `step`. `snapshot(runtime)` gives the value back.
-`describeEvent` and `describeState` are as for a `Model`. A part is a
+`ingest(runtime, event, step)` does one of the events, and
+`receive(runtime, from, message, step)` takes a message from a peer, both
+reaching other parts through `step`. `snapshot(runtime)` gives the value
+back. `describeEvent` and `describeState` are as for a `Model`. A part is a
 `Model` with its state split into a value for the cache and a runtime for
 the code — and `events` is a function of the value alone, never of the
 runtime, which is what lets a system of a thousand parts ask a state for
@@ -974,15 +975,28 @@ its events without instantiating one of them. It holds for every part
 named here: a host's due queue and pending distances are in its value,
 the network's messages in flight and its correlation lists are its value,
 a Durable Object's due alarm and queued deliveries are in its value, and a
-mock's pending requests are its value.
+mock's pending requests are its value. A part's value is a state the
+platform itself restarts from, and every input since: for a value part
+and a client, `initial` and the whole history; for a Durable Object,
+storage and alarm and the inputs since it came into memory, which is the
+fold under Why. That is what lets a restore depend on nothing but the
+value, and the independence has a third leg the framework cannot supply:
+the code's behaviour must be a function of its inputs, which the replay
+comparison and the rebuild check detect rather than enforce.
 
-The runtime is the kind's own, and the simulator never calls it. What it
-has is a typed interface for the kinds it talks to — what a host calls to
-send a request or abort one, what the network calls to deliver — and a
-part reaches a peer by its id, through `step`, which restores the peer if
-its runtime is not live and records it as touched, so the touched set of
-a step is the calls it made. No part keeps another's runtime: a runtime is
-rebuilt on demand, and a reference that outlived one would be stale.
+The runtime is the kind's own, and the simulator reaches it only through
+the kind. Parts talk by message: `ingest` or `receive` sends to a peer by
+id, `step.send(to, message)`, and the system delivers after the sender's
+microtasks have drained, into the peer's `receive`, restoring the peer
+first and draining again, until nothing is left to deliver. So the
+touched set of a step is its owner and every receiver; no part keeps
+another's runtime, which is rebuilt on demand; and a replay, which has no
+step, cannot send. The messages a kind accepts are its interface to its
+peers: what a host sends to the network, what the network delivers to a
+host or a mock. Restores are sequential, in the order sent, never
+concurrent: two replays at once would interleave their microtasks, and a
+divergence would show nondeterministically. Why messages and not calls is
+under Why.
 
 What is a part, and what is smaller: a single request is not one — it has
 no runtime, no event but its delivery, and its state is a position in
@@ -1015,18 +1029,20 @@ and the part's own order. Part order is declaration order for the parts a
 test names, then id order for the parts that came to exist; creation order
 would do as well for a reader but not for merging, since two histories
 that created the same parts in another order would be two states with
-equal snapshots. Its `applyEvent` restores the event's owner, and the
-parts a delivery reaches, through the registry — the runtime of a part
-exists only once an event is ingested into it or a delivery reaches it —
-calls `ingest` on the owner, waits for the microtask queue to drain, and
-snapshots the parts the step *touched*: the owner, the parts deliveries
-reached, the network outputs went to. Every other part's value is a value
-already, and is kept; the active set is updated from the same touched set.
+equal snapshots. Its `applyEvent` restores the event's owner through the
+registry, calls `ingest`, waits for the microtask queue to drain, then
+delivers what was sent, each message into its receiver's `receive` with
+the receiver restored first and a drain after, until nothing is left —
+the runtime of a part exists only once an event is ingested into it or a
+message reaches it — and snapshots the parts the step *touched*: the
+owner and every receiver. Every other part's value is a value already,
+and is kept; the active set is updated from the same touched set.
 The search core is unchanged, and merging is valsem equality on the
 product.
 
 The simulator knows five things, none about time and none about what parts
-say to each other: a step ends when the microtask queue is empty;
+say to each other: a step ends when nothing is left to deliver and the
+microtask queue is empty;
 `restore` touches nothing but its own part; a part's events are a function
 of its value; events are values naming things in a snapshot; the
 candidates come first, the free one before the others, and part order
@@ -1047,13 +1063,17 @@ candidates are exactly where it is made.
   `restore` resumes the live runtime when its log matches, else runs `main`
   again with the log replayed: inputs fed back, outputs suppressed and
   compared with the recording, a difference being the test's error, as a
-  body whose decisions change is today (D37). It expects the head of its
-  due queue; its other events are `advance(δ)`, one per distinct distance
-  among its pending timers — its own clock, local and relative, folded into
-  the host — and never expected, since time proceeds only when nothing else
-  can happen. One `advance` past several wake-ups is one event, and so one
-  deviation, where advancing one wake-up at a time is as many: a long stall
-  is one fault in the world. The states the two ways reach merge.
+  body whose decisions change is today (D37). The host records the
+  difference and `restore` raises it once the drain is over; it does not
+  throw it into the code, which may catch it — retry code catches
+  everything — and settle as if nothing had happened. It expects the head
+  of its due queue; its other events are `advance(δ)`, one per distinct
+  distance among its pending timers — its own clock, local and relative,
+  folded into the host — and never expected, since time proceeds only when
+  nothing else can happen. One `advance` past several wake-ups is one
+  event, and so one deviation, where advancing one wake-up at a time is as
+  many: a long stall is one fault in the world. The states the two ways
+  reach merge.
 - `mock(reducer)`: a value part. Its value is the reducer's state and its
   pending requests, in delivery order. Its events are the outcomes
   `handle(state, request)` returns for the oldest pending request — one, or
@@ -1069,12 +1089,16 @@ candidates are exactly where it is made.
   messages in flight, request legs and response legs, as serialised values
   each naming the position it is about, the correlation lists (below), and
   the orphans of aborted requests. It expects the delivery of the oldest
-  message in flight. Its other events are the other deliveries, a lost
-  request or response, and an orphan still reaching the server. Delivering
-  a request appends it to the receiver's pending requests, a mock's in its
-  value, a server host's in its runtime; delivering a response is the
-  client host's resolution of the promise at that position, inside the
-  step.
+  message in flight, an orphan like any other: what differs about an
+  orphan is that nobody listens for its answer. Its other events are the
+  other deliveries, and its faults: a lost message, which is silence, and
+  what a client makes of silence is its timer's business; and a failed
+  connection, which the client sees at once as a rejected fetch — before
+  delivery the server never saw the request, after it the server answered
+  and nobody heard. Delivering a request appends it to the receiver's
+  pending requests, a mock's in its value, a server host's in its runtime;
+  delivering a response is the client host's resolution of the promise at
+  that position, inside the step.
 
 **A request is named by its position**, never by an id. The network keeps,
 per client, that client's outstanding requests in the order sent, and, per
@@ -1122,19 +1146,20 @@ order, so its number keeps its meaning though it is not the minimum;
 `exhaustive` is untouched, being a statement about the space, which no seed
 changes. Why a seeded mode, and what it needs of the cache, is under Why.
 
-**Rules the parts obey.** Exactly two kinds of synchronous call cross a
-part boundary: a delivery into a part, and an output into the network,
-each a method of the receiving kind's runtime, reached by id through the
-step. Requests and responses are values at the boundary, and the host
-rebuilds `Request` and `Response` objects on its side. Replay never
-registers, cancels or sends. A request is named by its position, above,
-and nothing in a value counts the history. Nothing decides synchronously:
-a part with a choice offers it as events. None of this can be enforced in
+**Rules the parts obey.** Nothing crosses a part boundary but a message,
+sent through the step and delivered by the system after the sender's
+drain; a replay, having no step, cannot send, register or cancel.
+Requests and responses are values at the boundary, and the host rebuilds
+`Request` and `Response` objects on its side. A request is named by its
+position, above, and nothing in a value counts the history. Nothing
+decides synchronously: a part with a choice offers it as events. The
+first holds by construction; none of the rest can be enforced in
 JavaScript; the detector is to rebuild every part from its value at a
 sample of states, re-apply the step, and compare the product snapshot with
 the live one. A difference means state lived outside the snapshots.
 
-The drain that ends a step is a yield to the macrotask queue
+The drain after the owner's `ingest`, and after each delivery, is a
+yield to the macrotask queue
 (`setImmediate`, taken with the real timer as it was when stifinder loaded,
 since a test that fakes timers fakes that one too). It is not the yield
 D37 refused. That one would have let a body's own timers fire so the
@@ -1144,9 +1169,11 @@ timers of their own: their time is the host's, and nothing of theirs is on
 the macrotask queue to fire.
 
 For a program part the host sees every input it delivers and every output
-it takes, so its log is the trace: `explain` on a reported path is the
-replay with the log printed. D29's recorder argument stays for hand-written
-models and for value parts, whose `ingest` receives it on `step`.
+it takes, so its log is the trace, and the system sees every message
+between parts, so a reported path can show them without any part's help:
+`explain` on a reported path is the replay with the log and the messages
+printed. D29's recorder argument stays for hand-written models and for
+value parts, whose `ingest` receives it on `step`.
 
 **Properties.** `invariant` and `terminalInvariant` over the product value,
 as today; a state is terminal when no part has an event, and a steady
@@ -1209,6 +1236,32 @@ shifts, which the network does in the step that moves them and nowhere
 else. **Rejected:** letting the endpoints hold references to each other's
 positions. A client-side shift would then have to rewrite the server's
 value in a step that never touched the server.
+
+**Messages, not calls.** The first form had a part call a typed method on
+a peer's runtime, reached by id through the step, with the step restoring
+the peer on the way. **Rejected** (2026-10-18, by the prototype, next
+paragraph): restoring a program part is asynchronous, since a replay
+drains the microtask queue between the entries it feeds, so a receiver
+cannot be restored inside a synchronous call from its sender; the sender
+would have had to declare what it reaches so the system could restore
+that first, a declaration that can be wrong. With messages the system
+restores each receiver as it delivers. Two things come free: a replay has
+no step and so cannot send, where the first form had it as a rule; and
+every message that crosses a boundary passes through the system, which is
+the trace D29's recorder was for. The cost is that no call across a
+boundary returns a value, which none of them did: a send, a delivery and
+an answer are each one way.
+
+**The prototype.** `system`, `program`, `mock` and `http` were written on
+2026-10-18 as far as a test of a retrying fetch needs them, the test
+being a mock server as a reducer at a base URL, the code behind a host,
+and what must hold wherever the system stops. It is where the messages,
+the recorded divergence and the two network faults above come from.
+Within as many faults as the function retries it returns ok and the
+server has counted; at one more it gives up, with the trace; code that
+draws a random number is caught at its first replay. Replay ran on nearly
+every step under breadth-first search, as predicted, at 392 states in
+32 ms for four faults, so the remedy under Deferred is not yet needed.
 
 **The zero-delay expected schedule.** A delivery is instant on the
 baseline, and a timeout fires only as a deviation. **Rejected:** a nominal
@@ -1312,7 +1365,8 @@ stay on `decisionModel` until that arrives.
 
 **Values at the boundary, replay isolated, and a rebuild check.** A live
 `Response` passed across would couple two runtimes; a replay that re-sent
-its requests would double what the network already holds. The rebuild
+its requests would double what the network already holds, and with
+messages it cannot, having no step. The rebuild
 check needs no knowledge of interfaces, and catches nondeterminism, module
 state that survives a replay, and most hidden channels between parts.
 
@@ -1379,7 +1433,8 @@ step moved, not what the network holds.
    touched-set step, the network with its positions, the differential
    oracle.
 3. `program()` and the host: the log, resume or replay, suppression and
-   comparison, the rebuild check, the second oracle.
+   comparison with the divergence recorded, the rebuild check, the second
+   oracle.
 4. `http()` faults, abort and orphans; `mock` alternatives.
 5. `seed`, with the cache split and the re-counted report; the turn, if the
    two-client counter says so.
